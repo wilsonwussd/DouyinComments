@@ -5,12 +5,13 @@ import pandas as pd
 import traceback
 import re
 import requests
+import json
 from urllib.parse import urlparse
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QLabel, QCheckBox, QProgressBar, QMessageBox, QHeaderView,
-    QTextEdit, QRadioButton, QButtonGroup
+    QTextEdit, QRadioButton, QButtonGroup, QTabWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from main import fetch_all_comments_async, fetch_all_replies_async, process_comments, process_replies, load_cookie
@@ -116,6 +117,48 @@ def extract_video_id(share_text):
         logger.error(f"解析分享链接时出错: {str(e)}")
         return None
 
+class CookieManager:
+    """Cookie管理类"""
+    def __init__(self):
+        self.cookie_file = "cookie.txt"
+        
+    def save_cookies(self, cookies_json):
+        """保存Cookies"""
+        try:
+            # 解析JSON格式的cookies
+            cookies_data = json.loads(cookies_json)
+            # 转换为cookie字符串格式
+            cookie_str = "; ".join([f"{cookie['name']}={cookie['value']}" for cookie in cookies_data])
+            # 保存到文件
+            with open(self.cookie_file, "w", encoding="utf-8") as f:
+                f.write(cookie_str)
+            return True, "Cookies保存成功"
+        except Exception as e:
+            return False, f"保存Cookies失败: {str(e)}"
+            
+    def load_cookies(self):
+        """加载Cookies"""
+        try:
+            if not os.path.exists(self.cookie_file):
+                return False, "Cookie文件不存在"
+            with open(self.cookie_file, "r", encoding="utf-8") as f:
+                return True, f.read()
+        except Exception as e:
+            return False, f"加载Cookies失败: {str(e)}"
+            
+    def verify_cookies(self, cookies):
+        """验证Cookies有效性"""
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Cookie": cookies
+            }
+            # 尝试访问抖音首页
+            response = requests.get("https://www.douyin.com", headers=headers)
+            return response.status_code == 200, "Cookies有效" if response.status_code == 200 else "Cookies无效"
+        except Exception as e:
+            return False, f"验证Cookies失败: {str(e)}"
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -126,8 +169,15 @@ class MainWindow(QMainWindow):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         
-        # 创建布局
+        # 创建主布局
         layout = QVBoxLayout()
+        
+        # 创建标签页
+        tabs = QTabWidget()
+        
+        # 评论采集标签页
+        comment_tab = QWidget()
+        comment_layout = QVBoxLayout()
         
         # 创建输入选择区域
         input_type_layout = QHBoxLayout()
@@ -176,12 +226,52 @@ class MainWindow(QMainWindow):
             header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         
         # 添加到主布局
-        layout.addLayout(input_type_layout)
-        layout.addLayout(input_layout)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(QLabel("运行日志:"))
-        layout.addWidget(self.log_display)
-        layout.addWidget(self.table)
+        comment_layout.addLayout(input_type_layout)
+        comment_layout.addLayout(input_layout)
+        comment_layout.addWidget(self.progress_bar)
+        comment_layout.addWidget(QLabel("运行日志:"))
+        comment_layout.addWidget(self.log_display)
+        comment_layout.addWidget(self.table)
+        
+        comment_tab.setLayout(comment_layout)
+        tabs.addTab(comment_tab, "评论采集")
+        
+        # Cookie管理标签页
+        cookie_tab = QWidget()
+        cookie_layout = QVBoxLayout()
+        
+        # Cookie输入区域
+        cookie_input_label = QLabel("请粘贴JSON格式的Cookies:")
+        self.cookie_input = QTextEdit()
+        self.cookie_input.setPlaceholderText("在此粘贴从Cookie Editor导出的JSON内容...")
+        cookie_layout.addWidget(cookie_input_label)
+        cookie_layout.addWidget(self.cookie_input)
+        
+        # Cookie操作按钮
+        cookie_buttons_layout = QHBoxLayout()
+        self.import_cookie_btn = QPushButton("导入Cookies")
+        self.verify_cookie_btn = QPushButton("验证Cookies")
+        self.copy_cookie_btn = QPushButton("复制Cookies")
+        
+        self.import_cookie_btn.clicked.connect(self.import_cookies)
+        self.verify_cookie_btn.clicked.connect(self.verify_cookies)
+        self.copy_cookie_btn.clicked.connect(self.copy_cookies)
+        
+        cookie_buttons_layout.addWidget(self.import_cookie_btn)
+        cookie_buttons_layout.addWidget(self.verify_cookie_btn)
+        cookie_buttons_layout.addWidget(self.copy_cookie_btn)
+        
+        cookie_layout.addLayout(cookie_buttons_layout)
+        
+        # Cookie状态显示
+        self.cookie_status = QLabel("Cookie状态: 未导入")
+        cookie_layout.addWidget(self.cookie_status)
+        
+        cookie_tab.setLayout(cookie_layout)
+        tabs.addTab(cookie_tab, "Cookie管理")
+        
+        # 将标签页添加到主布局
+        layout.addWidget(tabs)
         
         main_widget.setLayout(layout)
         
@@ -194,6 +284,9 @@ class MainWindow(QMainWindow):
         # 连接单选按钮信号
         self.video_id_radio.toggled.connect(self.update_input_placeholder)
         self.share_link_radio.toggled.connect(self.update_input_placeholder)
+        
+        # 初始化Cookie管理器
+        self.cookie_manager = CookieManager()
 
     def update_input_placeholder(self):
         """更新输入框的提示文本"""
@@ -295,6 +388,54 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.add_log(f"错误: {error_msg}")
         QMessageBox.critical(self, "错误", f"采集过程中出现错误：\n{error_msg}")
+
+    def import_cookies(self):
+        """导入Cookies"""
+        try:
+            cookies_json = self.cookie_input.toPlainText().strip()
+            if not cookies_json:
+                QMessageBox.warning(self, "警告", "请先粘贴Cookies内容")
+                return
+                
+            success, message = self.cookie_manager.save_cookies(cookies_json)
+            if success:
+                self.cookie_status.setText("Cookie状态: 已导入")
+                QMessageBox.information(self, "成功", message)
+            else:
+                QMessageBox.warning(self, "失败", message)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导入Cookies时出错: {str(e)}")
+            
+    def verify_cookies(self):
+        """验证Cookies"""
+        try:
+            success, cookies = self.cookie_manager.load_cookies()
+            if not success:
+                QMessageBox.warning(self, "警告", cookies)
+                return
+                
+            valid, message = self.cookie_manager.verify_cookies(cookies)
+            self.cookie_status.setText(f"Cookie状态: {message}")
+            if valid:
+                QMessageBox.information(self, "成功", message)
+            else:
+                QMessageBox.warning(self, "失败", message)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"验证Cookies时出错: {str(e)}")
+            
+    def copy_cookies(self):
+        """复制Cookies"""
+        try:
+            success, cookies = self.cookie_manager.load_cookies()
+            if not success:
+                QMessageBox.warning(self, "警告", cookies)
+                return
+                
+            clipboard = QApplication.clipboard()
+            clipboard.setText(cookies)
+            QMessageBox.information(self, "成功", "Cookies已复制到剪贴板")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"复制Cookies时出错: {str(e)}")
 
 def main():
     try:
