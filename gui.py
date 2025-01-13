@@ -3,11 +3,14 @@ import os
 import asyncio
 import pandas as pd
 import traceback
+import re
+import requests
+from urllib.parse import urlparse
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QLabel, QCheckBox, QProgressBar, QMessageBox, QHeaderView,
-    QTextEdit
+    QTextEdit, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from main import fetch_all_comments_async, fetch_all_replies_async, process_comments, process_replies, load_cookie
@@ -79,6 +82,40 @@ class CommentWorker(QThread):
             except Exception as e:
                 logger.error(f"关闭事件循环时出错: {str(e)}")
 
+def extract_video_id(share_text):
+    """从分享文本中提取视频ID"""
+    try:
+        # 尝试直接匹配数字ID
+        if share_text.isdigit():
+            return share_text
+            
+        # 匹配短链接
+        url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+|v\.douyin\.com/[^\s<>"]+'
+        urls = re.findall(url_pattern, share_text)
+        
+        if not urls:
+            return None
+            
+        # 获取第一个URL
+        url = urls[0]
+        
+        # 如果是短链接，获取重定向后的URL
+        if 'v.douyin.com' in url:
+            response = requests.get(url, allow_redirects=True)
+            url = response.url
+            
+        # 从URL中提取视频ID
+        video_id_pattern = r'/video/(\d+)'
+        match = re.search(video_id_pattern, url)
+        
+        if match:
+            return match.group(1)
+            
+        return None
+    except Exception as e:
+        logger.error(f"解析分享链接时出错: {str(e)}")
+        return None
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -92,16 +129,28 @@ class MainWindow(QMainWindow):
         # 创建布局
         layout = QVBoxLayout()
         
+        # 创建输入选择区域
+        input_type_layout = QHBoxLayout()
+        self.input_type_group = QButtonGroup()
+        self.video_id_radio = QRadioButton("视频ID")
+        self.share_link_radio = QRadioButton("分享链接")
+        self.video_id_radio.setChecked(True)
+        self.input_type_group.addButton(self.video_id_radio)
+        self.input_type_group.addButton(self.share_link_radio)
+        input_type_layout.addWidget(self.video_id_radio)
+        input_type_layout.addWidget(self.share_link_radio)
+        input_type_layout.addStretch()
+        
         # 创建输入区域
         input_layout = QHBoxLayout()
-        self.video_id_input = QLineEdit()
-        self.video_id_input.setPlaceholderText("请输入视频ID")
+        self.input_field = QLineEdit()
+        self.input_field.setPlaceholderText("请输入视频ID或分享链接")
         self.get_replies_checkbox = QCheckBox("获取评论回复")
         self.start_button = QPushButton("开始采集")
         self.start_button.clicked.connect(self.start_collection)
         
-        input_layout.addWidget(QLabel("视频ID:"))
-        input_layout.addWidget(self.video_id_input)
+        input_layout.addWidget(QLabel("输入:"))
+        input_layout.addWidget(self.input_field)
         input_layout.addWidget(self.get_replies_checkbox)
         input_layout.addWidget(self.start_button)
         
@@ -127,6 +176,7 @@ class MainWindow(QMainWindow):
             header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         
         # 添加到主布局
+        layout.addLayout(input_type_layout)
         layout.addLayout(input_layout)
         layout.addWidget(self.progress_bar)
         layout.addWidget(QLabel("运行日志:"))
@@ -139,7 +189,18 @@ class MainWindow(QMainWindow):
         self.worker = None
         
         # 添加日志
-        self.add_log("程序已启动，等待输入视频ID...")
+        self.add_log("程序已启动，等待输入...")
+        
+        # 连接单选按钮信号
+        self.video_id_radio.toggled.connect(self.update_input_placeholder)
+        self.share_link_radio.toggled.connect(self.update_input_placeholder)
+
+    def update_input_placeholder(self):
+        """更新输入框的提示文本"""
+        if self.video_id_radio.isChecked():
+            self.input_field.setPlaceholderText("请输入视频ID")
+        else:
+            self.input_field.setPlaceholderText("请输入分享链接")
 
     def add_log(self, message):
         """添加日志到显示区域"""
@@ -151,10 +212,20 @@ class MainWindow(QMainWindow):
     def start_collection(self):
         """开始采集评论"""
         try:
-            video_id = self.video_id_input.text().strip()
-            if not video_id:
-                QMessageBox.warning(self, "警告", "请输入视频ID")
+            input_text = self.input_field.text().strip()
+            if not input_text:
+                QMessageBox.warning(self, "警告", "请输入视频ID或分享链接")
                 return
+            
+            video_id = input_text
+            if self.share_link_radio.isChecked():
+                # 解析分享链接
+                self.add_log("正在解析分享链接...")
+                video_id = extract_video_id(input_text)
+                if not video_id:
+                    QMessageBox.warning(self, "警告", "无法从分享链接中提取视频ID")
+                    return
+                self.add_log(f"成功提取视频ID: {video_id}")
             
             # 验证视频ID格式
             if not video_id.isdigit():
