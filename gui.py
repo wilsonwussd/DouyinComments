@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QFileDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QFont
 from main import fetch_all_comments_async, fetch_all_replies_async, process_comments, process_replies, load_cookie
 from loguru import logger
 
@@ -170,6 +170,19 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("抖音评论采集工具")
+        
+        # 设置合适的字体
+        font = QFont()
+        if sys.platform == "darwin":  # macOS
+            font.setFamily("Helvetica")  # 使用更基础的系统字体
+            chinese_font = QFont()
+            chinese_font.setFamily("STHeiti")  # macOS自带的中文字体
+            QApplication.setFont(chinese_font, "QWidget")
+        else:
+            font.setFamily("Microsoft YaHei")  # Windows 默认中文字体
+        font.setPointSize(12)
+        QApplication.setFont(font)
+        
         self.setGeometry(100, 100, 1200, 800)
         
         # 初始化Cookie管理器

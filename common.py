@@ -158,6 +158,15 @@ def get_ms_token(randomlength: int = 120) -> str:
         logger.error(f"生成msToken时发生错误: {str(e)}")
         return 'default_token'  # 返回默认token而不是失败
 
+def get_webid(params=None):
+    """生成19位随机数字的webid"""
+    try:
+        webid = ''.join([str(random.randint(0, 9)) for _ in range(19)])
+        return webid
+    except Exception as e:
+        logger.error(f"生成webid时出错: {str(e)}")
+        return '7362810250930783783'  # 返回一个默认的webid
+
 def common(uri: str, params: Dict, headers: Dict) -> Tuple[Dict, Dict]:
     """
     处理通用请求参数和头信息
@@ -178,6 +187,10 @@ def common(uri: str, params: Dict, headers: Dict) -> Tuple[Dict, Dict]:
         params.update(COMMON_PARAMS)
         headers.update(COMMON_HEADERS)
         
+        # 添加webid
+        if 'webid' not in params:
+            params['webid'] = get_webid(params)
+            
         # 处理参数
         params = deal_params(params, headers)
         
@@ -187,7 +200,7 @@ def common(uri: str, params: Dict, headers: Dict) -> Tuple[Dict, Dict]:
         
         try:
             a_bogus = DOUYIN_SIGN.call(call_name, query, headers["User-Agent"])
-            params["a_bogus"] = a_bogus
+            params["X-Bogus"] = a_bogus
             logger.debug(f"成功生成签名: {a_bogus[:20]}...")
         except Exception as e:
             logger.error(f"生成签名时发生错误: {str(e)}")
