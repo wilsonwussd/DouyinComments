@@ -11,9 +11,10 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QLabel, QCheckBox, QProgressBar, QMessageBox, QHeaderView,
-    QTextEdit, QRadioButton, QButtonGroup, QTabWidget
+    QTextEdit, QRadioButton, QButtonGroup, QTabWidget, QStatusBar
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor
 from main import fetch_all_comments_async, fetch_all_replies_async, process_comments, process_replies, load_cookie
 from loguru import logger
 
@@ -40,10 +41,11 @@ class CommentWorker(QThread):
     error = pyqtSignal(str)        # 错误信号
     log = pyqtSignal(str)          # 日志信号
 
-    def __init__(self, aweme_id, get_replies=False):
+    def __init__(self, aweme_id, get_replies=False, cookie=None):
         super().__init__()
         self.aweme_id = aweme_id
         self.get_replies = get_replies
+        self.cookie = cookie
 
     def run(self):
         try:
@@ -51,10 +53,14 @@ class CommentWorker(QThread):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
+            # 使用传入的cookie
+            if self.cookie:
+                os.environ["DOUYIN_COOKIE"] = self.cookie
+            
             self.log.emit(f"开始获取视频 {self.aweme_id} 的评论...")
             comments = loop.run_until_complete(fetch_all_comments_async(self.aweme_id))
             if not comments:
-                raise Exception("未获取到评论数据，请检查视频ID是否正确")
+                raise Exception("未获取到评论数据，请检查视频ID是否正确或Cookie是否有效")
                 
             self.log.emit("处理评论数据...")
             comments_df = process_comments(comments)
@@ -165,6 +171,53 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("抖音评论采集工具")
         self.setGeometry(100, 100, 1200, 800)
         
+        # 初始化Cookie管理器
+        self.cookie_manager = CookieManager()
+        self.current_cookie = None
+        
+        # 创建定时器，每5分钟验证一次Cookie
+        self.cookie_timer = QTimer()
+        self.cookie_timer.setInterval(5 * 60 * 1000)  # 5分钟 = 5 * 60 * 1000毫秒
+        self.cookie_timer.timeout.connect(self.auto_verify_cookies)
+        
+        # 创建状态栏
+        self.statusBar = QStatusBar()
+        self.setStatusBar(self.statusBar)
+        
+        # 创建状态标签
+        self.status_layout = QHBoxLayout()
+        
+        # Cookie导入状态
+        self.cookie_import_label = QLabel("Cookie导入状态:")
+        self.cookie_import_icon = QLabel("●")
+        self.cookie_import_icon.setStyleSheet("color: black;")
+        self.cookie_import_text = QLabel("未导入")
+        
+        # Cookie验证状态
+        self.cookie_verify_label = QLabel("Cookie验证状态:")
+        self.cookie_verify_icon = QLabel("●")
+        self.cookie_verify_icon.setStyleSheet("color: black;")
+        self.cookie_verify_text = QLabel("未验证")
+        
+        # 将标签添加到状态栏
+        status_widget = QWidget()
+        status_layout = QHBoxLayout(status_widget)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 添加导入状态
+        status_layout.addWidget(self.cookie_import_label)
+        status_layout.addWidget(self.cookie_import_icon)
+        status_layout.addWidget(self.cookie_import_text)
+        status_layout.addSpacing(20)  # 添加间距
+        
+        # 添加验证状态
+        status_layout.addWidget(self.cookie_verify_label)
+        status_layout.addWidget(self.cookie_verify_icon)
+        status_layout.addWidget(self.cookie_verify_text)
+        status_layout.addStretch()
+        
+        self.statusBar.addWidget(status_widget)
+        
         # 创建主窗口部件
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -174,67 +227,6 @@ class MainWindow(QMainWindow):
         
         # 创建标签页
         tabs = QTabWidget()
-        
-        # 评论采集标签页
-        comment_tab = QWidget()
-        comment_layout = QVBoxLayout()
-        
-        # 创建输入选择区域
-        input_type_layout = QHBoxLayout()
-        self.input_type_group = QButtonGroup()
-        self.video_id_radio = QRadioButton("视频ID")
-        self.share_link_radio = QRadioButton("分享链接")
-        self.video_id_radio.setChecked(True)
-        self.input_type_group.addButton(self.video_id_radio)
-        self.input_type_group.addButton(self.share_link_radio)
-        input_type_layout.addWidget(self.video_id_radio)
-        input_type_layout.addWidget(self.share_link_radio)
-        input_type_layout.addStretch()
-        
-        # 创建输入区域
-        input_layout = QHBoxLayout()
-        self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("请输入视频ID或分享链接")
-        self.get_replies_checkbox = QCheckBox("获取评论回复")
-        self.start_button = QPushButton("开始采集")
-        self.start_button.clicked.connect(self.start_collection)
-        
-        input_layout.addWidget(QLabel("输入:"))
-        input_layout.addWidget(self.input_field)
-        input_layout.addWidget(self.get_replies_checkbox)
-        input_layout.addWidget(self.start_button)
-        
-        # 创建进度条
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        
-        # 创建日志显示区域
-        self.log_display = QTextEdit()
-        self.log_display.setReadOnly(True)
-        self.log_display.setMaximumHeight(100)
-        
-        # 创建表格
-        self.table = QTableWidget()
-        self.table.setColumnCount(8)
-        self.table.setHorizontalHeaderLabels([
-            "评论ID", "评论内容", "点赞数", "评论时间",
-            "用户昵称", "用户抖音号", "IP归属", "回复总数"
-        ])
-        # 设置表格列宽自动调整
-        header = self.table.horizontalHeader()
-        for i in range(8):
-            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
-        
-        # 添加到主布局
-        comment_layout.addLayout(input_type_layout)
-        comment_layout.addLayout(input_layout)
-        comment_layout.addWidget(self.progress_bar)
-        comment_layout.addWidget(QLabel("运行日志:"))
-        comment_layout.addWidget(self.log_display)
-        comment_layout.addWidget(self.table)
-        
-        comment_tab.setLayout(comment_layout)
-        tabs.addTab(comment_tab, "评论采集")
         
         # Cookie管理标签页
         cookie_tab = QWidget()
@@ -264,11 +256,76 @@ class MainWindow(QMainWindow):
         cookie_layout.addLayout(cookie_buttons_layout)
         
         # Cookie状态显示
-        self.cookie_status = QLabel("Cookie状态: 未导入")
-        cookie_layout.addWidget(self.cookie_status)
+        status_layout = QHBoxLayout()
+        status_layout.addWidget(QLabel("Cookie状态:"))
+        self.cookie_status = QLabel("未验证")
+        self.cookie_status.setStyleSheet("color: black;")  # 默认黑色
+        status_layout.addWidget(self.cookie_status)
+        status_layout.addStretch()  # 添加弹性空间
+        
+        # Cookie有效性显示
+        validity_layout = QHBoxLayout()
+        validity_layout.addWidget(QLabel("Cookie有效性:"))
+        self.cookie_validity = QLabel("未验证")
+        self.cookie_validity.setStyleSheet("color: black;")  # 默认黑色
+        validity_layout.addWidget(self.cookie_validity)
+        validity_layout.addStretch()  # 添加弹性空间
+        
+        cookie_layout.addLayout(status_layout)
+        cookie_layout.addLayout(validity_layout)
         
         cookie_tab.setLayout(cookie_layout)
+        
+        # 评论采集标签页
+        comment_tab = QWidget()
+        comment_layout = QVBoxLayout()
+        
+        # 创建输入区域
+        input_layout = QHBoxLayout()
+        self.input_field = QLineEdit()
+        self.input_field.setPlaceholderText("请粘贴抖音分享链接")
+        self.get_replies_checkbox = QCheckBox("获取评论回复")
+        self.start_button = QPushButton("开始采集")
+        self.start_button.clicked.connect(self.start_collection)
+        
+        input_layout.addWidget(QLabel("分享链接:"))
+        input_layout.addWidget(self.input_field)
+        input_layout.addWidget(self.get_replies_checkbox)
+        input_layout.addWidget(self.start_button)
+        
+        # 创建进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        
+        # 创建日志显示区域
+        self.log_display = QTextEdit()
+        self.log_display.setReadOnly(True)
+        self.log_display.setMaximumHeight(100)
+        
+        # 创建表格
+        self.table = QTableWidget()
+        self.table.setColumnCount(8)
+        self.table.setHorizontalHeaderLabels([
+            "评论ID", "评论内容", "点赞数", "评论时间",
+            "用户昵称", "用户抖音号", "IP归属", "回复总数"
+        ])
+        # 设置表格列宽自动调整
+        header = self.table.horizontalHeader()
+        for i in range(8):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        
+        # 添加到主布局
+        comment_layout.addLayout(input_layout)
+        comment_layout.addWidget(self.progress_bar)
+        comment_layout.addWidget(QLabel("运行日志:"))
+        comment_layout.addWidget(self.log_display)
+        comment_layout.addWidget(self.table)
+        
+        comment_tab.setLayout(comment_layout)
+        
+        # 将标签页添加到标签页控件（注意顺序）
         tabs.addTab(cookie_tab, "Cookie管理")
+        tabs.addTab(comment_tab, "评论采集")
         
         # 将标签页添加到主布局
         layout.addWidget(tabs)
@@ -279,21 +336,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         
         # 添加日志
-        self.add_log("程序已启动，等待输入...")
-        
-        # 连接单选按钮信号
-        self.video_id_radio.toggled.connect(self.update_input_placeholder)
-        self.share_link_radio.toggled.connect(self.update_input_placeholder)
-        
-        # 初始化Cookie管理器
-        self.cookie_manager = CookieManager()
-
-    def update_input_placeholder(self):
-        """更新输入框的提示文本"""
-        if self.video_id_radio.isChecked():
-            self.input_field.setPlaceholderText("请输入视频ID")
-        else:
-            self.input_field.setPlaceholderText("请输入分享链接")
+        self.add_log("程序已启动，请先在Cookie管理页面导入并验证Cookie...")
 
     def add_log(self, message):
         """添加日志到显示区域"""
@@ -305,26 +348,33 @@ class MainWindow(QMainWindow):
     def start_collection(self):
         """开始采集评论"""
         try:
-            input_text = self.input_field.text().strip()
-            if not input_text:
-                QMessageBox.warning(self, "警告", "请输入视频ID或分享链接")
-                return
-            
-            video_id = input_text
-            if self.share_link_radio.isChecked():
-                # 解析分享链接
-                self.add_log("正在解析分享链接...")
-                video_id = extract_video_id(input_text)
-                if not video_id:
-                    QMessageBox.warning(self, "警告", "无法从分享链接中提取视频ID")
-                    return
-                self.add_log(f"成功提取视频ID: {video_id}")
-            
-            # 验证视频ID格式
-            if not video_id.isdigit():
-                QMessageBox.warning(self, "警告", "视频ID必须是数字")
+            # 检查是否有cookie
+            if not self.current_cookie:
+                QMessageBox.warning(self, "警告", "请先在Cookie管理页面导入并验证Cookie")
                 return
                 
+            # 在开始采集前重新验证cookie
+            valid, message = self.cookie_manager.verify_cookies(self.current_cookie)
+            if not valid:
+                self.current_cookie = None
+                self.cookie_verify_icon.setStyleSheet("color: red;")
+                self.cookie_verify_text.setText("无效")
+                QMessageBox.warning(self, "Cookie已失效", "Cookie已失效，请重新导入并验证Cookie")
+                return
+                
+            input_text = self.input_field.text().strip()
+            if not input_text:
+                QMessageBox.warning(self, "警告", "请粘贴抖音分享链接")
+                return
+            
+            # 解析分享链接
+            self.add_log("正在解析分享链接...")
+            video_id = extract_video_id(input_text)
+            if not video_id:
+                QMessageBox.warning(self, "警告", "无法从分享链接中提取视频ID")
+                return
+            self.add_log(f"成功提取视频ID: {video_id}")
+            
             # 清空日志显示
             self.log_display.clear()
             self.add_log(f"开始采集视频ID: {video_id} 的评论...")
@@ -334,8 +384,8 @@ class MainWindow(QMainWindow):
             self.progress_bar.setVisible(True)
             self.progress_bar.setRange(0, 0)  # 显示忙碌状态
             
-            # 创建并启动工作线程
-            self.worker = CommentWorker(video_id, self.get_replies_checkbox.isChecked())
+            # 创建并启动工作线程，传入当前cookie
+            self.worker = CommentWorker(video_id, self.get_replies_checkbox.isChecked(), self.current_cookie)
             self.worker.finished.connect(self.on_collection_finished)
             self.worker.error.connect(self.on_error)
             self.worker.log.connect(self.add_log)
@@ -399,11 +449,18 @@ class MainWindow(QMainWindow):
                 
             success, message = self.cookie_manager.save_cookies(cookies_json)
             if success:
-                self.cookie_status.setText("Cookie状态: 已导入")
+                self.cookie_import_icon.setStyleSheet("color: green;")
+                self.cookie_import_text.setText("已导入")
+                self.cookie_verify_icon.setStyleSheet("color: black;")
+                self.cookie_verify_text.setText("未验证")
                 QMessageBox.information(self, "成功", message)
             else:
+                self.cookie_import_icon.setStyleSheet("color: red;")
+                self.cookie_import_text.setText("导入失败")
                 QMessageBox.warning(self, "失败", message)
         except Exception as e:
+            self.cookie_import_icon.setStyleSheet("color: red;")
+            self.cookie_import_text.setText("导入失败")
             QMessageBox.critical(self, "错误", f"导入Cookies时出错: {str(e)}")
             
     def verify_cookies(self):
@@ -411,16 +468,38 @@ class MainWindow(QMainWindow):
         try:
             success, cookies = self.cookie_manager.load_cookies()
             if not success:
+                self.cookie_import_icon.setStyleSheet("color: red;")
+                self.cookie_import_text.setText("加载失败")
+                self.cookie_verify_icon.setStyleSheet("color: red;")
+                self.cookie_verify_text.setText("无效")
                 QMessageBox.warning(self, "警告", cookies)
                 return
                 
             valid, message = self.cookie_manager.verify_cookies(cookies)
-            self.cookie_status.setText(f"Cookie状态: {message}")
+            self.cookie_import_text.setText("已导入")
+            
             if valid:
+                self.current_cookie = cookies
+                self.cookie_verify_icon.setStyleSheet("color: green;")
+                self.cookie_verify_text.setText("有效")
                 QMessageBox.information(self, "成功", message)
+                # 启动定时验证
+                self.cookie_timer.start()
             else:
+                self.current_cookie = None
+                self.cookie_verify_icon.setStyleSheet("color: red;")
+                self.cookie_verify_text.setText("无效")
+                # 停止定时验证
+                self.cookie_timer.stop()
                 QMessageBox.warning(self, "失败", message)
         except Exception as e:
+            self.current_cookie = None
+            self.cookie_import_icon.setStyleSheet("color: red;")
+            self.cookie_import_text.setText("验证失败")
+            self.cookie_verify_icon.setStyleSheet("color: red;")
+            self.cookie_verify_text.setText("无效")
+            # 停止定时验证
+            self.cookie_timer.stop()
             QMessageBox.critical(self, "错误", f"验证Cookies时出错: {str(e)}")
             
     def copy_cookies(self):
@@ -437,12 +516,34 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"复制Cookies时出错: {str(e)}")
 
+    def auto_verify_cookies(self):
+        """自动验证Cookie有效性"""
+        try:
+            if not self.current_cookie:
+                return
+                
+            logger.info("开始自动验证Cookie有效性...")
+            valid, message = self.cookie_manager.verify_cookies(self.current_cookie)
+            
+            if valid:
+                self.cookie_verify_icon.setStyleSheet("color: green;")
+                self.cookie_verify_text.setText("有效")
+                logger.info("自动验证Cookie: 有效")
+            else:
+                self.current_cookie = None
+                self.cookie_verify_icon.setStyleSheet("color: red;")
+                self.cookie_verify_text.setText("无效")
+                logger.warning("自动验证Cookie: 无效")
+                # 显示通知
+                QMessageBox.warning(self, "Cookie已失效", "Cookie已失效，请重新导入并验证Cookie")
+        except Exception as e:
+            self.current_cookie = None
+            self.cookie_verify_icon.setStyleSheet("color: red;")
+            self.cookie_verify_text.setText("无效")
+            logger.error(f"自动验证Cookie时出错: {str(e)}")
+
 def main():
     try:
-        # 加载cookie
-        logger.info("正在加载cookie...")
-        load_cookie()
-        
         # 创建应用
         app = QApplication(sys.argv)
         window = MainWindow()
