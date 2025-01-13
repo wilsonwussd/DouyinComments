@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QLabel, QCheckBox, QProgressBar, QMessageBox, QHeaderView,
-    QTextEdit, QRadioButton, QButtonGroup, QTabWidget, QStatusBar
+    QTextEdit, QRadioButton, QButtonGroup, QTabWidget, QStatusBar,
+    QFileDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor
@@ -255,25 +256,6 @@ class MainWindow(QMainWindow):
         
         cookie_layout.addLayout(cookie_buttons_layout)
         
-        # Cookie状态显示
-        status_layout = QHBoxLayout()
-        status_layout.addWidget(QLabel("Cookie状态:"))
-        self.cookie_status = QLabel("未验证")
-        self.cookie_status.setStyleSheet("color: black;")  # 默认黑色
-        status_layout.addWidget(self.cookie_status)
-        status_layout.addStretch()  # 添加弹性空间
-        
-        # Cookie有效性显示
-        validity_layout = QHBoxLayout()
-        validity_layout.addWidget(QLabel("Cookie有效性:"))
-        self.cookie_validity = QLabel("未验证")
-        self.cookie_validity.setStyleSheet("color: black;")  # 默认黑色
-        validity_layout.addWidget(self.cookie_validity)
-        validity_layout.addStretch()  # 添加弹性空间
-        
-        cookie_layout.addLayout(status_layout)
-        cookie_layout.addLayout(validity_layout)
-        
         cookie_tab.setLayout(cookie_layout)
         
         # 评论采集标签页
@@ -286,12 +268,16 @@ class MainWindow(QMainWindow):
         self.input_field.setPlaceholderText("请粘贴抖音分享链接")
         self.get_replies_checkbox = QCheckBox("获取评论回复")
         self.start_button = QPushButton("开始采集")
+        self.save_button = QPushButton("保存数据")
         self.start_button.clicked.connect(self.start_collection)
+        self.save_button.clicked.connect(self.save_data)
+        self.save_button.setEnabled(False)
         
         input_layout.addWidget(QLabel("分享链接:"))
         input_layout.addWidget(self.input_field)
         input_layout.addWidget(self.get_replies_checkbox)
         input_layout.addWidget(self.start_button)
+        input_layout.addWidget(self.save_button)
         
         # 创建进度条
         self.progress_bar = QProgressBar()
@@ -402,6 +388,9 @@ class MainWindow(QMainWindow):
             # 清空表格
             self.table.setRowCount(0)
             
+            # 保存数据用于导出
+            self.current_data = data
+            
             # 填充数据
             for index, row in data.iterrows():
                 row_position = self.table.rowCount()
@@ -420,6 +409,7 @@ class MainWindow(QMainWindow):
             # 恢复界面状态
             self.start_button.setEnabled(True)
             self.progress_bar.setVisible(False)
+            self.save_button.setEnabled(True)
             
             # 添加日志
             self.add_log(f"数据采集完成，共获取 {self.table.rowCount()} 条数据")
@@ -541,6 +531,36 @@ class MainWindow(QMainWindow):
             self.cookie_verify_icon.setStyleSheet("color: red;")
             self.cookie_verify_text.setText("无效")
             logger.error(f"自动验证Cookie时出错: {str(e)}")
+
+    def save_data(self):
+        """保存数据到Excel文件"""
+        try:
+            if not hasattr(self, 'current_data') or self.current_data is None:
+                QMessageBox.warning(self, "警告", "没有可保存的数据")
+                return
+                
+            # 获取保存文件路径
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存数据",
+                "抖音评论数据.xlsx",
+                "Excel Files (*.xlsx);;All Files (*)"
+            )
+            
+            if file_path:
+                # 如果用户没有指定.xlsx后缀，添加它
+                if not file_path.endswith('.xlsx'):
+                    file_path += '.xlsx'
+                    
+                # 保存数据到Excel
+                self.current_data.to_excel(file_path, index=False, engine='openpyxl')
+                self.add_log(f"数据已保存到: {file_path}")
+                QMessageBox.information(self, "成功", "数据已成功保存到Excel文件")
+                
+        except Exception as e:
+            error_msg = f"保存数据时出错:\n{str(e)}"
+            logger.error(error_msg)
+            QMessageBox.critical(self, "错误", error_msg)
 
 def main():
     try:
