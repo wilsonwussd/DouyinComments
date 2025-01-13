@@ -2,7 +2,7 @@ import os
 import asyncio
 import pandas as pd
 from datetime import datetime
-from fetch_comments import fetch_comments
+from fetch_comments import fetch_all_comments
 from fetch_replies import fetch_replies
 from loguru import logger
 
@@ -29,7 +29,7 @@ async def fetch_all_comments_async(aweme_id):
     """异步获取所有评论"""
     try:
         cookie = load_cookie()
-        return await fetch_comments(aweme_id, cookie)
+        return await fetch_all_comments(aweme_id, cookie)
     except Exception as e:
         logger.error(f"获取评论时发生错误: {str(e)}")
         return None
@@ -60,16 +60,20 @@ def process_comments(comments):
         
     data = []
     for comment in comments:
-        data.append({
-            "评论ID": comment["cid"],
-            "评论内容": comment["text"],
-            "点赞数": comment["digg_count"],
-            "评论时间": datetime.fromtimestamp(comment["create_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-            "用户昵称": comment["user"]["nickname"],
-            "用户抖音号": comment["user"].get("unique_id", "未设置"),
-            "ip归属": comment.get("ip_label", "未知"),
-            "回复总数": comment.get("reply_comment_total", 0)
-        })
+        try:
+            data.append({
+                "评论ID": comment.get("cid", ""),
+                "评论内容": comment.get("text", ""),
+                "点赞数": comment.get("digg_count", 0),
+                "评论时间": datetime.fromtimestamp(comment.get("create_time", 0)).strftime("%Y-%m-%d %H:%M:%S"),
+                "用户昵称": comment.get("user", {}).get("nickname", "未知"),
+                "用户抖音号": comment.get("user", {}).get("unique_id", "未设置"),
+                "ip归属": comment.get("ip_label", "未知"),
+                "回复总数": comment.get("reply_comment_total", 0)
+            })
+        except Exception as e:
+            logger.error(f"处理评论数据时出错: {str(e)}, 评论数据: {comment}")
+            continue
     return pd.DataFrame(data)
 
 def process_replies(replies, comments_df):
@@ -79,16 +83,20 @@ def process_replies(replies, comments_df):
         
     data = []
     for reply in replies:
-        data.append({
-            "评论ID": reply["cid"],
-            "评论内容": reply["text"],
-            "点赞数": reply["digg_count"],
-            "评论时间": datetime.fromtimestamp(reply["create_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-            "用户昵称": reply["user"]["nickname"],
-            "用户抖音号": reply["user"].get("unique_id", "未设置"),
-            "ip归属": reply.get("ip_label", "未知"),
-            "回复总数": 0  # 二级评论没有回复
-        })
+        try:
+            data.append({
+                "评论ID": reply.get("cid", ""),
+                "评论内容": reply.get("text", ""),
+                "点赞数": reply.get("digg_count", 0),
+                "评论时间": datetime.fromtimestamp(reply.get("create_time", 0)).strftime("%Y-%m-%d %H:%M:%S"),
+                "用户昵称": reply.get("user", {}).get("nickname", "未知"),
+                "用户抖音号": reply.get("user", {}).get("unique_id", "未设置"),
+                "ip归属": reply.get("ip_label", "未知"),
+                "回复总数": 0  # 二级评论没有回复
+            })
+        except Exception as e:
+            logger.error(f"处理回复数据时出错: {str(e)}, 回复数据: {reply}")
+            continue
     return pd.DataFrame(data)
 
 async def main_async():

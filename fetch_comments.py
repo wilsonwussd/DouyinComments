@@ -6,7 +6,7 @@ from common import common
 # 配置常量
 url = "https://www.douyin.com/aweme/v1/web/comment/list/"
 
-async def fetch_comments(aweme_id: str, cookie: str, cursor: str = "0", count: str = "50"):
+async def fetch_comments(aweme_id: str, cookie: str, cursor: str = "0", count: str = "100"):
     """获取评论数据"""
     try:
         if not cookie:
@@ -31,33 +31,32 @@ async def fetch_comments(aweme_id: str, cookie: str, cursor: str = "0", count: s
             if data.get("status_code") != 0:
                 raise ValueError(f"请求失败: {data.get('status_msg', '未知错误')}")
                 
-            return data.get("comments", [])
+            return data.get("comments", []), data.get("has_more", 0), data.get("cursor", cursor)
             
     except httpx.HTTPError as e:
         logger.error(f"获取评论时发生网络错误: {str(e)}")
-        return []
+        return [], 0, cursor
     except Exception as e:
         logger.error(f"获取评论时发生错误: {str(e)}")
-        return []
+        return [], 0, cursor
 
 async def fetch_all_comments(aweme_id: str, cookie: str):
     """获取所有评论"""
     try:
         cursor = "0"
         all_comments = []
-        has_more = True
+        has_more = 1
         
         while has_more:
-            comments = await fetch_comments(aweme_id, cookie, cursor)
+            comments, has_more, next_cursor = await fetch_comments(aweme_id, cookie, cursor)
             if not comments:
                 break
                 
             all_comments.extend(comments)
             logger.info(f"已获取 {len(all_comments)} 条评论")
             
-            # 检查是否还有更多评论
-            has_more = len(comments) == 50  # 如果返回的评论数量等于请求的数量，说明可能还有更多
-            cursor = str(len(all_comments))  # 更新cursor
+            # 更新cursor
+            cursor = next_cursor
             
             # 添加延时避免请求过快
             await asyncio.sleep(1)
