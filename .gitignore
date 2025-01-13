@@ -20,22 +20,26 @@ wheels/
 .installed.cfg
 *.egg
 
-# Virtual Environment
+# 虚拟环境
 venv/
 ENV/
+env/
 
-# IDE
+# IDE配置
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# Logs
+# 日志文件
 *.log
 error.log
 gui_error.log
 
-# Project specific
-data/
+# 项目特定文件
 cookie.txt
-.DS_Store 
+data/
+
+# 系统文件
+.DS_Store
+Thumbs.db 
