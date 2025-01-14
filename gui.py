@@ -200,14 +200,21 @@ class AIAnalysisWorker(QThread):
     finished = pyqtSignal(str)  # 完成信号
     error = pyqtSignal(str)    # 错误信号
 
-    def __init__(self, api: DeepSeekAPI, comments_text: str):
+    def __init__(self, api: DeepSeekAPI, comments_text: str, custom_prompt: str = None):
         super().__init__()
         self.api = api
         self.comments_text = comments_text
+        self.custom_prompt = custom_prompt
 
     def run(self):
         try:
-            result = self.api.analyze_comments(self.comments_text)
+            if self.custom_prompt:
+                # 使用自定义提示词
+                result = self.api.analyze_with_prompt(self.custom_prompt)
+            else:
+                # 使用默认分析
+                result = self.api.analyze_comments(self.comments_text)
+            
             # 提取AI回复内容
             response_text = result['choices'][0]['message']['content']
             self.finished.emit(response_text)
@@ -620,17 +627,49 @@ class MainWindow(QMainWindow):
         analysis_group = QGroupBox("AI分析")
         analysis_layout = QVBoxLayout()
         
-        # 分析按钮
+        # 分析按钮区域
+        buttons_layout = QHBoxLayout()
+        
+        # 默认分析按钮
         analyze_btn = QPushButton("开始AI分析")
+        analyze_btn.setObjectName("开始AI分析")  # 设置对象名，用于后续查找
         analyze_btn.clicked.connect(self.start_ai_analysis)
+        buttons_layout.addWidget(analyze_btn)
+        
+        analysis_layout.addLayout(buttons_layout)
+        
+        # 自定义提问区域
+        custom_group = QGroupBox("自定义提问")
+        custom_layout = QVBoxLayout()
+        
+        # 提示标签
+        hint_label = QLabel("在下方输入您的问题，AI将基于已采集的评论数据进行回答：")
+        custom_layout.addWidget(hint_label)
+        
+        # 问题输入框
+        self.question_input = QTextEdit()
+        self.question_input.setPlaceholderText("例如：这些评论中最关注的问题是什么？用户对产品最不满意的地方是什么？")
+        self.question_input.setMaximumHeight(100)
+        custom_layout.addWidget(self.question_input)
+        
+        # 提问按钮
+        ask_btn = QPushButton("向AI提问")
+        ask_btn.clicked.connect(self.ask_ai_question)
+        custom_layout.addWidget(ask_btn)
+        
+        # 添加自定义提问区域
+        analysis_layout.addWidget(custom_group)
+        custom_group.setLayout(custom_layout)
         
         # 分析结果显示区域
+        result_label = QLabel("分析结果：")
+        analysis_layout.addWidget(result_label)
+        
         self.analysis_result = QTextEdit()
         self.analysis_result.setReadOnly(True)
         self.analysis_result.setPlaceholderText("AI分析结果将在这里显示")
-        
-        analysis_layout.addWidget(analyze_btn)
         analysis_layout.addWidget(self.analysis_result)
+        
         analysis_group.setLayout(analysis_layout)
         
         # 添加到主布局
@@ -644,7 +683,7 @@ class MainWindow(QMainWindow):
         
         # 添加到标签页
         self.tab_widget.addTab(ai_tab, "AI分析")
-
+        
     def verify_api_key(self):
         """验证API Key"""
         api_key = self.api_key_input.text().strip()
@@ -672,26 +711,28 @@ class MainWindow(QMainWindow):
         comments_text = self.current_data['评论内容'].str.cat(sep='\n')
         
         # 创建并启动分析线程
-        self.analysis_worker = AIAnalysisWorker(self.deepseek_api, comments_text)
+        self.analysis_worker = AIAnalysisWorker(
+            self.deepseek_api, 
+            comments_text,
+            custom_prompt=None  # 使用默认分析模式
+        )
         self.analysis_worker.finished.connect(self.on_analysis_finished)
         self.analysis_worker.error.connect(self.on_analysis_error)
         self.analysis_worker.start()
         
-        # 禁用分析按钮
-        analyze_btn = self.tab_widget.findChild(QPushButton, "开始AI分析")
-        if analyze_btn:
-            analyze_btn.setEnabled(False)
+        # 禁用所有按钮
+        self.disable_analysis_buttons()
         self.analysis_result.setText("正在进行AI分析，请稍候...")
 
     def on_analysis_finished(self, result):
         """AI分析完成回调"""
         self.analysis_result.setText(result)
-        self.tab_widget.findChild(QPushButton, "开始AI分析").setEnabled(True)
+        self.enable_analysis_buttons()
 
     def on_analysis_error(self, error_msg):
         """AI分析错误回调"""
         QMessageBox.warning(self, "错误", f"AI分析失败: {error_msg}")
-        self.tab_widget.findChild(QPushButton, "开始AI分析").setEnabled(True)
+        self.enable_analysis_buttons()
 
     def create_collection_tab(self):
         """创建评论采集标签页"""
@@ -783,6 +824,70 @@ class MainWindow(QMainWindow):
         
         # 尝试加载保存的Cookies
         self.load_saved_cookies()
+
+    def ask_ai_question(self):
+        """处理自定义AI提问"""
+        if not self.deepseek_api.api_key:
+            QMessageBox.warning(self, "警告", "请先设置并验证API Key")
+            return
+            
+        if not hasattr(self, 'current_data') or self.current_data is None or self.current_data.empty:
+            QMessageBox.warning(self, "警告", "请先采集评论数据")
+            return
+            
+        question = self.question_input.toPlainText().strip()
+        if not question:
+            QMessageBox.warning(self, "警告", "请输入您的问题")
+            return
+            
+        # 准备评论文本
+        comments_text = self.current_data['评论内容'].str.cat(sep='\n')
+        
+        # 创建并启动分析线程
+        self.analysis_worker = AIAnalysisWorker(
+            self.deepseek_api, 
+            comments_text,
+            custom_prompt=f"""请基于以下抖音评论内容，回答用户的问题：
+
+问题：{question}
+
+评论内容：
+{comments_text}
+"""
+        )
+        self.analysis_worker.finished.connect(self.on_analysis_finished)
+        self.analysis_worker.error.connect(self.on_analysis_error)
+        self.analysis_worker.start()
+        
+        # 禁用所有按钮
+        self.disable_analysis_buttons()
+        self.analysis_result.setText("正在思考您的问题，请稍候...")
+
+    def disable_analysis_buttons(self):
+        """禁用所有分析相关按钮"""
+        # 禁用默认分析按钮
+        analyze_btn = self.tab_widget.findChild(QPushButton, "开始AI分析")
+        if analyze_btn:
+            analyze_btn.setEnabled(False)
+        
+        # 禁用提问按钮和输入框
+        for widget in self.tab_widget.findChildren(QPushButton):
+            if widget.text() == "向AI提问":
+                widget.setEnabled(False)
+        self.question_input.setEnabled(False)
+
+    def enable_analysis_buttons(self):
+        """启用所有分析相关按钮"""
+        # 启用默认分析按钮
+        analyze_btn = self.tab_widget.findChild(QPushButton, "开始AI分析")
+        if analyze_btn:
+            analyze_btn.setEnabled(True)
+        
+        # 启用提问按钮和输入框
+        for widget in self.tab_widget.findChildren(QPushButton):
+            if widget.text() == "向AI提问":
+                widget.setEnabled(True)
+        self.question_input.setEnabled(True)
 
 def main():
     try:

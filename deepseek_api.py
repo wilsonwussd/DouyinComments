@@ -57,11 +57,6 @@ class DeepSeekAPI:
         if not self.api_key:
             raise ValueError("API Key未设置")
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-
         prompt = f"""请分析以下抖音评论内容，并提供以下方面的分析：
 1. 情感倾向分析（正面、负面、中性的比例）
 2. 主要话题和关键词提取
@@ -72,6 +67,20 @@ class DeepSeekAPI:
 评论内容：
 {comments_text}
 """
+        return self._send_request(prompt)
+
+    def analyze_with_prompt(self, prompt: str) -> dict:
+        """使用自定义提示词分析内容"""
+        if not self.api_key:
+            raise ValueError("API Key未设置")
+        return self._send_request(prompt)
+
+    def _send_request(self, prompt: str) -> dict:
+        """发送API请求"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
 
         try:
             response = requests.post(
