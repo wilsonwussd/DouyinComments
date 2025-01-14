@@ -12,11 +12,12 @@ from PyQt6.QtWidgets import (
     QLineEdit, QPushButton, QTableWidget, QTableWidgetItem,
     QLabel, QCheckBox, QProgressBar, QMessageBox, QHeaderView,
     QTextEdit, QRadioButton, QButtonGroup, QTabWidget, QStatusBar,
-    QFileDialog
+    QFileDialog, QGroupBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont
 from main import fetch_all_comments_async, fetch_all_replies_async, process_comments, process_replies, load_cookie
+from deepseek_api import DeepSeekAPI
 from loguru import logger
 
 # 配置日志
@@ -47,7 +48,7 @@ class CommentWorker(QThread):
         self.aweme_id = aweme_id
         self.get_replies = get_replies
         self.cookie = cookie
-
+        
     def run(self):
         try:
             self.log.emit("开始创建事件循环...")
@@ -59,9 +60,20 @@ class CommentWorker(QThread):
                 os.environ["DOUYIN_COOKIE"] = self.cookie
             
             self.log.emit(f"开始获取视频 {self.aweme_id} 的评论...")
-            comments = loop.run_until_complete(fetch_all_comments_async(self.aweme_id))
-            if not comments:
-                raise Exception("未获取到评论数据，请检查视频ID是否正确或Cookie是否有效")
+            try:
+                comments = loop.run_until_complete(fetch_all_comments_async(self.aweme_id))
+                if not comments:
+                    raise Exception("未获取到评论数据")
+            except ValueError as e:
+                error_msg = str(e)
+                if "Cookie已失效" in error_msg:
+                    raise Exception("Cookie已失效，请更新Cookie")
+                elif "视频不存在" in error_msg or "已被删除" in error_msg:
+                    raise Exception("视频不存在或已被删除")
+                elif "IP被限制" in error_msg:
+                    raise Exception("IP被限制，请稍后再试")
+                else:
+                    raise Exception(f"获取评论失败: {error_msg}")
                 
             self.log.emit("处理评论数据...")
             comments_df = process_comments(comments)
@@ -69,19 +81,23 @@ class CommentWorker(QThread):
             
             if self.get_replies:
                 self.log.emit("开始获取评论回复...")
-                replies = loop.run_until_complete(fetch_all_replies_async(comments))
-                self.log.emit(f"成功获取 {len(replies)} 条回复")
-                replies_df = process_replies(replies, comments_df)
-                result = pd.concat([comments_df, replies_df], ignore_index=True)
-                self.log.emit(f"总计获取 {len(result)} 条数据")
+                try:
+                    replies = loop.run_until_complete(fetch_all_replies_async(comments))
+                    self.log.emit(f"成功获取 {len(replies)} 条回复")
+                    replies_df = process_replies(replies, comments_df)
+                    result = pd.concat([comments_df, replies_df], ignore_index=True)
+                except Exception as e:
+                    self.log.emit(f"获取回复时出错: {str(e)}")
+                    # 如果获取回复失败，仍然返回评论数据
+                    result = comments_df
             else:
                 result = comments_df
                 
             self.finished.emit(result)
             
         except Exception as e:
-            error_msg = f"错误详情:\n{str(e)}\n\n堆栈跟踪:\n{traceback.format_exc()}"
-            logger.error(error_msg)
+            error_msg = str(e)
+            logger.error(f"错误详情: {error_msg}")
             self.error.emit(error_msg)
         finally:
             try:
@@ -128,15 +144,18 @@ class CookieManager:
     """Cookie管理类"""
     def __init__(self):
         self.cookie_file = "cookie.txt"
+        self.cookie_json_file = "cookie_json.txt"
         
     def save_cookies(self, cookies_json):
         """保存Cookies"""
         try:
-            # 解析JSON格式的cookies
+            # 保存原始JSON格式的cookies
+            with open(self.cookie_json_file, "w", encoding="utf-8") as f:
+                f.write(cookies_json)
+            
+            # 解析JSON格式的cookies并保存为字符串格式
             cookies_data = json.loads(cookies_json)
-            # 转换为cookie字符串格式
             cookie_str = "; ".join([f"{cookie['name']}={cookie['value']}" for cookie in cookies_data])
-            # 保存到文件
             with open(self.cookie_file, "w", encoding="utf-8") as f:
                 f.write(cookie_str)
             return True, "Cookies保存成功"
@@ -144,7 +163,7 @@ class CookieManager:
             return False, f"保存Cookies失败: {str(e)}"
             
     def load_cookies(self):
-        """加载Cookies"""
+        """加载Cookies字符串格式"""
         try:
             if not os.path.exists(self.cookie_file):
                 return False, "Cookie文件不存在"
@@ -152,6 +171,16 @@ class CookieManager:
                 return True, f.read()
         except Exception as e:
             return False, f"加载Cookies失败: {str(e)}"
+            
+    def load_cookies_json(self):
+        """加载JSON格式的Cookies"""
+        try:
+            if not os.path.exists(self.cookie_json_file):
+                return False, "Cookie JSON文件不存在"
+            with open(self.cookie_json_file, "r", encoding="utf-8") as f:
+                return True, f.read()
+        except Exception as e:
+            return False, f"加载Cookies JSON失败: {str(e)}"
             
     def verify_cookies(self, cookies):
         """验证Cookies有效性"""
@@ -165,6 +194,25 @@ class CookieManager:
             return response.status_code == 200, "Cookies有效" if response.status_code == 200 else "Cookies无效"
         except Exception as e:
             return False, f"验证Cookies失败: {str(e)}"
+
+class AIAnalysisWorker(QThread):
+    """AI分析工作线程"""
+    finished = pyqtSignal(str)  # 完成信号
+    error = pyqtSignal(str)    # 错误信号
+
+    def __init__(self, api: DeepSeekAPI, comments_text: str):
+        super().__init__()
+        self.api = api
+        self.comments_text = comments_text
+
+    def run(self):
+        try:
+            result = self.api.analyze_comments(self.comments_text)
+            # 提取AI回复内容
+            response_text = result['choices'][0]['message']['content']
+            self.finished.emit(response_text)
+        except Exception as e:
+            self.error.emit(str(e))
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -232,46 +280,421 @@ class MainWindow(QMainWindow):
         
         self.statusBar.addWidget(status_widget)
         
-        # 创建主窗口部件
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
+        # 初始化DeepSeek API
+        self.deepseek_api = DeepSeekAPI()
         
-        # 创建主布局
-        layout = QVBoxLayout()
+        # 创建主窗口部件
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
         
         # 创建标签页
-        tabs = QTabWidget()
+        self.tab_widget = QTabWidget()
         
-        # Cookie管理标签页
-        cookie_tab = QWidget()
-        cookie_layout = QVBoxLayout()
+        # 创建三个标签页（按新的顺序）
+        self.create_cookie_tab()      # 第一个标签页：Cookie管理
+        self.create_collection_tab()  # 第二个标签页：评论采集
+        self.create_ai_analysis_tab() # 第三个标签页：AI分析
         
-        # Cookie输入区域
-        cookie_input_label = QLabel("请粘贴JSON格式的Cookies:")
-        self.cookie_input = QTextEdit()
-        self.cookie_input.setPlaceholderText("在此粘贴从Cookie Editor导出的JSON内容...")
-        cookie_layout.addWidget(cookie_input_label)
-        cookie_layout.addWidget(self.cookie_input)
+        # 创建主布局
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.tab_widget)
+        self.central_widget.setLayout(main_layout)
         
-        # Cookie操作按钮
-        cookie_buttons_layout = QHBoxLayout()
-        self.import_cookie_btn = QPushButton("导入Cookies")
-        self.verify_cookie_btn = QPushButton("验证Cookies")
-        self.copy_cookie_btn = QPushButton("复制Cookies")
+        # 初始化工作线程
+        self.worker = None
         
-        self.import_cookie_btn.clicked.connect(self.import_cookies)
-        self.verify_cookie_btn.clicked.connect(self.verify_cookies)
-        self.copy_cookie_btn.clicked.connect(self.copy_cookies)
+        # 添加日志
+        self.add_log("程序已启动，请先在Cookie管理页面导入并验证Cookie...")
+
+    def add_log(self, message):
+        """添加日志到显示区域"""
+        self.log_display.append(f"{message}")
+        self.log_display.verticalScrollBar().setValue(
+            self.log_display.verticalScrollBar().maximum()
+        )
+
+    def start_collection(self):
+        """开始采集评论"""
+        try:
+            # 检查是否有cookie
+            if not self.current_cookie:
+                QMessageBox.warning(self, "警告", "请先在Cookie管理页面导入并验证Cookie")
+                return
+                
+            # 在开始采集前重新验证cookie
+            valid, message = self.cookie_manager.verify_cookies(self.current_cookie)
+            if not valid:
+                self.current_cookie = None
+                self.cookie_verify_icon.setStyleSheet("color: red;")
+                self.cookie_verify_text.setText("无效")
+                QMessageBox.warning(self, "Cookie已失效", "Cookie已失效，请重新导入并验证Cookie")
+                return
+                
+            input_text = self.input_field.text().strip()
+            if not input_text:
+                QMessageBox.warning(self, "警告", "请粘贴抖音分享链接")
+                return
+            
+            # 解析分享链接
+            self.add_log("正在解析分享链接...")
+            video_id = extract_video_id(input_text)
+            if not video_id:
+                QMessageBox.warning(self, "警告", "无法从分享链接中提取视频ID")
+                return
+            self.add_log(f"成功提取视频ID: {video_id}")
+            
+            # 清空日志显示和表格
+            self.log_display.clear()
+            self.table.setRowCount(0)
+            self.add_log(f"开始采集视频ID: {video_id} 的评论...")
+            
+            # 禁用开始按钮和保存按钮
+            self.start_button.setEnabled(False)
+            self.save_button.setEnabled(False)
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 0)  # 显示忙碌状态
+            
+            # 创建并启动工作线程，传入当前cookie
+            self.worker = CommentWorker(video_id, self.get_replies_checkbox.isChecked(), self.current_cookie)
+            self.worker.finished.connect(self.on_collection_finished)
+            self.worker.error.connect(self.on_collection_error)
+            self.worker.log.connect(self.add_log)
+            self.worker.start()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"启动采集时出错: {str(e)}")
+            self.start_button.setEnabled(True)
+            self.progress_bar.setVisible(False)
+
+    def on_collection_error(self, error_msg):
+        """处理采集错误"""
+        self.start_button.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.save_button.setEnabled(False)
         
-        cookie_buttons_layout.addWidget(self.import_cookie_btn)
-        cookie_buttons_layout.addWidget(self.verify_cookie_btn)
-        cookie_buttons_layout.addWidget(self.copy_cookie_btn)
+        # 根据错误类型显示不同的提示
+        if "Cookie已失效" in error_msg:
+            QMessageBox.warning(self, "Cookie已失效", "Cookie已失效，请更新Cookie")
+            self.cookie_verify_icon.setStyleSheet("color: red;")
+            self.cookie_verify_text.setText("无效")
+        elif "视频不存在" in error_msg or "已被删除" in error_msg:
+            QMessageBox.warning(self, "视频不存在", "视频不存在或已被删除")
+        elif "IP被限制" in error_msg:
+            QMessageBox.warning(self, "访问受限", "IP被限制，请稍后再试")
+        else:
+            QMessageBox.critical(self, "错误", f"采集失败: {error_msg}")
         
-        cookie_layout.addLayout(cookie_buttons_layout)
+        self.add_log(f"采集失败: {error_msg}")
+
+    def on_collection_finished(self, data):
+        """采集完成的回调函数"""
+        try:
+            if data is None or data.empty:
+                self.add_log("未获取到有效数据")
+                QMessageBox.warning(self, "提示", "未获取到有效数据")
+                return
+                
+            # 清空表格
+            self.table.setRowCount(0)
+            
+            # 保存数据用于导出
+            self.current_data = data
+            
+            # 填充数据
+            for index, row in data.iterrows():
+                row_position = self.table.rowCount()
+                self.table.insertRow(row_position)
+                
+                # 设置单元格内容
+                self.table.setItem(row_position, 0, QTableWidgetItem(str(row['评论ID'])))
+                self.table.setItem(row_position, 1, QTableWidgetItem(str(row['评论内容'])))
+                self.table.setItem(row_position, 2, QTableWidgetItem(str(row['点赞数'])))
+                self.table.setItem(row_position, 3, QTableWidgetItem(str(row['评论时间'])))
+                self.table.setItem(row_position, 4, QTableWidgetItem(str(row['用户昵称'])))
+                self.table.setItem(row_position, 5, QTableWidgetItem(str(row['用户抖音号'])))
+                self.table.setItem(row_position, 6, QTableWidgetItem(str(row['ip归属'])))
+                self.table.setItem(row_position, 7, QTableWidgetItem(str(row.get('回复总数', 0))))
+            
+            # 恢复界面状态
+            self.start_button.setEnabled(True)
+            self.progress_bar.setVisible(False)
+            self.save_button.setEnabled(True)
+            
+            # 添加日志
+            self.add_log(f"数据采集完成，共获取 {self.table.rowCount()} 条数据")
+            
+            # 显示完成消息
+            QMessageBox.information(self, "提示", f"采集完成，共获取 {self.table.rowCount()} 条数据")
+            
+        except Exception as e:
+            self.add_log(f"处理数据时出错: {str(e)}")
+            QMessageBox.critical(self, "错误", f"处理数据时出错: {str(e)}")
+            self.start_button.setEnabled(True)
+            self.progress_bar.setVisible(False)
+
+    def load_saved_cookies(self):
+        """加载保存的Cookies，静默验证不显示提示框"""
+        success, cookies_json = self.cookie_manager.load_cookies_json()
+        if success:
+            self.cookie_input.setText(cookies_json)
+            # 加载Cookie字符串格式并设置状态
+            success, cookies = self.cookie_manager.load_cookies()
+            if success:
+                self.cookie_import_icon.setStyleSheet("color: green;")
+                self.cookie_import_text.setText("已导入")
+                # 静默验证Cookie
+                try:
+                    valid, _ = self.cookie_manager.verify_cookies(cookies)
+                    if valid:
+                        self.current_cookie = cookies
+                        self.cookie_verify_icon.setStyleSheet("color: green;")
+                        self.cookie_verify_text.setText("有效")
+                        # 启动定时验证
+                        self.cookie_timer.start()
+                    else:
+                        self.cookie_verify_icon.setStyleSheet("color: red;")
+                        self.cookie_verify_text.setText("无效")
+                except:
+                    # 验证出错时不显示错误提示，只更新状态
+                    self.cookie_verify_icon.setStyleSheet("color: red;")
+                    self.cookie_verify_text.setText("无效")
+            
+    def import_cookies(self):
+        """导入Cookies"""
+        try:
+            cookies_json = self.cookie_input.toPlainText().strip()
+            if not cookies_json:
+                QMessageBox.warning(self, "警告", "请先粘贴Cookies内容")
+                return
+                
+            success, message = self.cookie_manager.save_cookies(cookies_json)
+            if success:
+                self.cookie_import_icon.setStyleSheet("color: green;")
+                self.cookie_import_text.setText("已导入")
+                self.cookie_verify_icon.setStyleSheet("color: black;")
+                self.cookie_verify_text.setText("未验证")
+                QMessageBox.information(self, "成功", message)
+            else:
+                self.cookie_import_icon.setStyleSheet("color: red;")
+                self.cookie_import_text.setText("导入失败")
+                QMessageBox.warning(self, "失败", message)
+        except Exception as e:
+            self.cookie_import_icon.setStyleSheet("color: red;")
+            self.cookie_import_text.setText("导入失败")
+            QMessageBox.critical(self, "错误", f"导入Cookies时出错: {str(e)}")
+            
+    def verify_cookies(self):
+        """手动验证Cookies，显示验证结果"""
+        try:
+            success, cookies = self.cookie_manager.load_cookies()
+            if not success:
+                self.cookie_import_icon.setStyleSheet("color: red;")
+                self.cookie_import_text.setText("加载失败")
+                self.cookie_verify_icon.setStyleSheet("color: red;")
+                self.cookie_verify_text.setText("无效")
+                QMessageBox.warning(self, "警告", cookies)
+                return
+                
+            valid, message = self.cookie_manager.verify_cookies(cookies)
+            self.cookie_import_text.setText("已导入")
+            
+            if valid:
+                self.current_cookie = cookies
+                self.cookie_verify_icon.setStyleSheet("color: green;")
+                self.cookie_verify_text.setText("有效")
+                QMessageBox.information(self, "成功", message)
+                # 启动定时验证
+                self.cookie_timer.start()
+            else:
+                self.current_cookie = None
+                self.cookie_verify_icon.setStyleSheet("color: red;")
+                self.cookie_verify_text.setText("无效")
+                # 停止定时验证
+                self.cookie_timer.stop()
+                QMessageBox.warning(self, "失败", message)
+        except Exception as e:
+            self.current_cookie = None
+            self.cookie_import_icon.setStyleSheet("color: red;")
+            self.cookie_import_text.setText("验证失败")
+            self.cookie_verify_icon.setStyleSheet("color: red;")
+            self.cookie_verify_text.setText("无效")
+            # 停止定时验证
+            self.cookie_timer.stop()
+            QMessageBox.critical(self, "错误", f"验证Cookies时出错: {str(e)}")
+            
+    def auto_verify_cookies(self):
+        """自动验证Cookie有效性，仅在失效时显示提示"""
+        try:
+            if not self.current_cookie:
+                return
+                
+            logger.info("开始自动验证Cookie有效性...")
+            valid, _ = self.cookie_manager.verify_cookies(self.current_cookie)
+            
+            if valid:
+                self.cookie_verify_icon.setStyleSheet("color: green;")
+                self.cookie_verify_text.setText("有效")
+                logger.info("自动验证Cookie: 有效")
+            else:
+                self.current_cookie = None
+                self.cookie_verify_icon.setStyleSheet("color: red;")
+                self.cookie_verify_text.setText("无效")
+                logger.warning("自动验证Cookie: 无效")
+                # 仅在Cookie失效时显示通知
+                QMessageBox.warning(self, "Cookie已失效", "Cookie已失效，请重新导入并验证Cookie")
+                # 停止定时验证
+                self.cookie_timer.stop()
+        except Exception as e:
+            self.current_cookie = None
+            self.cookie_verify_icon.setStyleSheet("color: red;")
+            self.cookie_verify_text.setText("无效")
+            logger.error(f"自动验证Cookie时出错: {str(e)}")
+            # 停止定时验证
+            self.cookie_timer.stop()
+            
+    def copy_cookies(self):
+        """复制Cookies"""
+        try:
+            success, cookies_json = self.cookie_manager.load_cookies_json()
+            if not success:
+                QMessageBox.warning(self, "警告", cookies_json)
+                return
+                
+            clipboard = QApplication.clipboard()
+            clipboard.setText(cookies_json)
+            QMessageBox.information(self, "成功", "Cookies已复制到剪贴板")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"复制Cookies时出错: {str(e)}")
+
+    def save_data(self):
+        """保存数据到Excel文件"""
+        try:
+            if not hasattr(self, 'current_data') or self.current_data is None:
+                QMessageBox.warning(self, "警告", "没有可保存的数据")
+                return
+                
+            # 获取保存文件路径
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "保存数据",
+                "抖音评论数据.xlsx",
+                "Excel Files (*.xlsx);;All Files (*)"
+            )
+            
+            if file_path:
+                # 如果用户没有指定.xlsx后缀，添加它
+                if not file_path.endswith('.xlsx'):
+                    file_path += '.xlsx'
+                    
+                # 保存数据到Excel
+                self.current_data.to_excel(file_path, index=False, engine='openpyxl')
+                self.add_log(f"数据已保存到: {file_path}")
+                QMessageBox.information(self, "成功", "数据已成功保存到Excel文件")
+                
+        except Exception as e:
+            error_msg = f"保存数据时出错:\n{str(e)}"
+            logger.error(error_msg)
+            QMessageBox.critical(self, "错误", error_msg)
+
+    def create_ai_analysis_tab(self):
+        """创建AI分析标签页"""
+        ai_tab = QWidget()
+        layout = QVBoxLayout()
         
-        cookie_tab.setLayout(cookie_layout)
+        # API Key设置组
+        api_group = QGroupBox("DeepSeek API设置")
+        api_layout = QHBoxLayout()
         
-        # 评论采集标签页
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText("请输入DeepSeek API Key")
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)  # 密码模式显示
+        
+        verify_btn = QPushButton("验证API Key")
+        verify_btn.clicked.connect(self.verify_api_key)
+        
+        api_layout.addWidget(self.api_key_input)
+        api_layout.addWidget(verify_btn)
+        api_group.setLayout(api_layout)
+        
+        # AI分析区域
+        analysis_group = QGroupBox("AI分析")
+        analysis_layout = QVBoxLayout()
+        
+        # 分析按钮
+        analyze_btn = QPushButton("开始AI分析")
+        analyze_btn.clicked.connect(self.start_ai_analysis)
+        
+        # 分析结果显示区域
+        self.analysis_result = QTextEdit()
+        self.analysis_result.setReadOnly(True)
+        self.analysis_result.setPlaceholderText("AI分析结果将在这里显示")
+        
+        analysis_layout.addWidget(analyze_btn)
+        analysis_layout.addWidget(self.analysis_result)
+        analysis_group.setLayout(analysis_layout)
+        
+        # 添加到主布局
+        layout.addWidget(api_group)
+        layout.addWidget(analysis_group)
+        ai_tab.setLayout(layout)
+        
+        # 加载保存的API Key
+        if self.deepseek_api.api_key:
+            self.api_key_input.setText(self.deepseek_api.api_key)
+        
+        # 添加到标签页
+        self.tab_widget.addTab(ai_tab, "AI分析")
+
+    def verify_api_key(self):
+        """验证API Key"""
+        api_key = self.api_key_input.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "警告", "请输入API Key")
+            return
+            
+        if self.deepseek_api.verify_api_key(api_key):
+            self.deepseek_api.save_api_key(api_key)
+            QMessageBox.information(self, "成功", "API Key验证成功并已保存")
+        else:
+            QMessageBox.warning(self, "错误", "API Key验证失败，请检查是否正确")
+
+    def start_ai_analysis(self):
+        """开始AI分析"""
+        if not self.deepseek_api.api_key:
+            QMessageBox.warning(self, "警告", "请先设置并验证API Key")
+            return
+            
+        if not hasattr(self, 'current_data') or self.current_data is None or self.current_data.empty:
+            QMessageBox.warning(self, "警告", "请先采集评论数据")
+            return
+            
+        # 准备评论文本
+        comments_text = self.current_data['评论内容'].str.cat(sep='\n')
+        
+        # 创建并启动分析线程
+        self.analysis_worker = AIAnalysisWorker(self.deepseek_api, comments_text)
+        self.analysis_worker.finished.connect(self.on_analysis_finished)
+        self.analysis_worker.error.connect(self.on_analysis_error)
+        self.analysis_worker.start()
+        
+        # 禁用分析按钮
+        analyze_btn = self.tab_widget.findChild(QPushButton, "开始AI分析")
+        if analyze_btn:
+            analyze_btn.setEnabled(False)
+        self.analysis_result.setText("正在进行AI分析，请稍候...")
+
+    def on_analysis_finished(self, result):
+        """AI分析完成回调"""
+        self.analysis_result.setText(result)
+        self.tab_widget.findChild(QPushButton, "开始AI分析").setEnabled(True)
+
+    def on_analysis_error(self, error_msg):
+        """AI分析错误回调"""
+        QMessageBox.warning(self, "错误", f"AI分析失败: {error_msg}")
+        self.tab_widget.findChild(QPushButton, "开始AI分析").setEnabled(True)
+
+    def create_collection_tab(self):
+        """创建评论采集标签页"""
         comment_tab = QWidget()
         comment_layout = QVBoxLayout()
         
@@ -322,258 +745,44 @@ class MainWindow(QMainWindow):
         
         comment_tab.setLayout(comment_layout)
         
-        # 将标签页添加到标签页控件（注意顺序）
-        tabs.addTab(cookie_tab, "Cookie管理")
-        tabs.addTab(comment_tab, "评论采集")
+        # 添加到标签页
+        self.tab_widget.addTab(comment_tab, "评论采集")
+
+    def create_cookie_tab(self):
+        """创建Cookie管理标签页"""
+        cookie_tab = QWidget()
+        cookie_layout = QVBoxLayout()
         
-        # 将标签页添加到主布局
-        layout.addWidget(tabs)
+        # Cookie输入区域
+        cookie_input_label = QLabel("请粘贴JSON格式的Cookies:")
+        self.cookie_input = QTextEdit()
+        self.cookie_input.setPlaceholderText("在此粘贴从Cookie Editor导出的JSON内容...")
+        cookie_layout.addWidget(cookie_input_label)
+        cookie_layout.addWidget(self.cookie_input)
         
-        main_widget.setLayout(layout)
+        # Cookie操作按钮
+        cookie_buttons_layout = QHBoxLayout()
+        self.import_cookie_btn = QPushButton("导入Cookies")
+        self.verify_cookie_btn = QPushButton("验证Cookies")
+        self.copy_cookie_btn = QPushButton("复制Cookies")
         
-        # 初始化工作线程
-        self.worker = None
+        self.import_cookie_btn.clicked.connect(self.import_cookies)
+        self.verify_cookie_btn.clicked.connect(self.verify_cookies)
+        self.copy_cookie_btn.clicked.connect(self.copy_cookies)
         
-        # 添加日志
-        self.add_log("程序已启动，请先在Cookie管理页面导入并验证Cookie...")
-
-    def add_log(self, message):
-        """添加日志到显示区域"""
-        self.log_display.append(f"{message}")
-        self.log_display.verticalScrollBar().setValue(
-            self.log_display.verticalScrollBar().maximum()
-        )
-
-    def start_collection(self):
-        """开始采集评论"""
-        try:
-            # 检查是否有cookie
-            if not self.current_cookie:
-                QMessageBox.warning(self, "警告", "请先在Cookie管理页面导入并验证Cookie")
-                return
-                
-            # 在开始采集前重新验证cookie
-            valid, message = self.cookie_manager.verify_cookies(self.current_cookie)
-            if not valid:
-                self.current_cookie = None
-                self.cookie_verify_icon.setStyleSheet("color: red;")
-                self.cookie_verify_text.setText("无效")
-                QMessageBox.warning(self, "Cookie已失效", "Cookie已失效，请重新导入并验证Cookie")
-                return
-                
-            input_text = self.input_field.text().strip()
-            if not input_text:
-                QMessageBox.warning(self, "警告", "请粘贴抖音分享链接")
-                return
-            
-            # 解析分享链接
-            self.add_log("正在解析分享链接...")
-            video_id = extract_video_id(input_text)
-            if not video_id:
-                QMessageBox.warning(self, "警告", "无法从分享链接中提取视频ID")
-                return
-            self.add_log(f"成功提取视频ID: {video_id}")
-            
-            # 清空日志显示
-            self.log_display.clear()
-            self.add_log(f"开始采集视频ID: {video_id} 的评论...")
-            
-            # 禁用开始按钮
-            self.start_button.setEnabled(False)
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setRange(0, 0)  # 显示忙碌状态
-            
-            # 创建并启动工作线程，传入当前cookie
-            self.worker = CommentWorker(video_id, self.get_replies_checkbox.isChecked(), self.current_cookie)
-            self.worker.finished.connect(self.on_collection_finished)
-            self.worker.error.connect(self.on_error)
-            self.worker.log.connect(self.add_log)
-            self.worker.start()
-            
-        except Exception as e:
-            error_msg = f"启动采集时出错:\n{str(e)}\n\n堆栈跟踪:\n{traceback.format_exc()}"
-            logger.error(error_msg)
-            self.on_error(error_msg)
-
-    def on_collection_finished(self, data):
-        """采集完成的回调函数"""
-        try:
-            # 清空表格
-            self.table.setRowCount(0)
-            
-            # 保存数据用于导出
-            self.current_data = data
-            
-            # 填充数据
-            for index, row in data.iterrows():
-                row_position = self.table.rowCount()
-                self.table.insertRow(row_position)
-                
-                # 设置单元格内容
-                self.table.setItem(row_position, 0, QTableWidgetItem(str(row['评论ID'])))
-                self.table.setItem(row_position, 1, QTableWidgetItem(str(row['评论内容'])))
-                self.table.setItem(row_position, 2, QTableWidgetItem(str(row['点赞数'])))
-                self.table.setItem(row_position, 3, QTableWidgetItem(str(row['评论时间'])))
-                self.table.setItem(row_position, 4, QTableWidgetItem(str(row['用户昵称'])))
-                self.table.setItem(row_position, 5, QTableWidgetItem(str(row['用户抖音号'])))
-                self.table.setItem(row_position, 6, QTableWidgetItem(str(row['ip归属'])))
-                self.table.setItem(row_position, 7, QTableWidgetItem(str(row.get('回复总数', 0))))
-            
-            # 恢复界面状态
-            self.start_button.setEnabled(True)
-            self.progress_bar.setVisible(False)
-            self.save_button.setEnabled(True)
-            
-            # 添加日志
-            self.add_log(f"数据采集完成，共获取 {self.table.rowCount()} 条数据")
-            
-            # 显示完成消息
-            QMessageBox.information(self, "提示", f"采集完成，共获取 {self.table.rowCount()} 条数据")
-            
-        except Exception as e:
-            error_msg = f"处理数据时出错:\n{str(e)}\n\n堆栈跟踪:\n{traceback.format_exc()}"
-            logger.error(error_msg)
-            self.on_error(error_msg)
-
-    def on_error(self, error_msg):
-        """错误处理"""
-        self.start_button.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.add_log(f"错误: {error_msg}")
-        QMessageBox.critical(self, "错误", f"采集过程中出现错误：\n{error_msg}")
-
-    def import_cookies(self):
-        """导入Cookies"""
-        try:
-            cookies_json = self.cookie_input.toPlainText().strip()
-            if not cookies_json:
-                QMessageBox.warning(self, "警告", "请先粘贴Cookies内容")
-                return
-                
-            success, message = self.cookie_manager.save_cookies(cookies_json)
-            if success:
-                self.cookie_import_icon.setStyleSheet("color: green;")
-                self.cookie_import_text.setText("已导入")
-                self.cookie_verify_icon.setStyleSheet("color: black;")
-                self.cookie_verify_text.setText("未验证")
-                QMessageBox.information(self, "成功", message)
-            else:
-                self.cookie_import_icon.setStyleSheet("color: red;")
-                self.cookie_import_text.setText("导入失败")
-                QMessageBox.warning(self, "失败", message)
-        except Exception as e:
-            self.cookie_import_icon.setStyleSheet("color: red;")
-            self.cookie_import_text.setText("导入失败")
-            QMessageBox.critical(self, "错误", f"导入Cookies时出错: {str(e)}")
-            
-    def verify_cookies(self):
-        """验证Cookies"""
-        try:
-            success, cookies = self.cookie_manager.load_cookies()
-            if not success:
-                self.cookie_import_icon.setStyleSheet("color: red;")
-                self.cookie_import_text.setText("加载失败")
-                self.cookie_verify_icon.setStyleSheet("color: red;")
-                self.cookie_verify_text.setText("无效")
-                QMessageBox.warning(self, "警告", cookies)
-                return
-                
-            valid, message = self.cookie_manager.verify_cookies(cookies)
-            self.cookie_import_text.setText("已导入")
-            
-            if valid:
-                self.current_cookie = cookies
-                self.cookie_verify_icon.setStyleSheet("color: green;")
-                self.cookie_verify_text.setText("有效")
-                QMessageBox.information(self, "成功", message)
-                # 启动定时验证
-                self.cookie_timer.start()
-            else:
-                self.current_cookie = None
-                self.cookie_verify_icon.setStyleSheet("color: red;")
-                self.cookie_verify_text.setText("无效")
-                # 停止定时验证
-                self.cookie_timer.stop()
-                QMessageBox.warning(self, "失败", message)
-        except Exception as e:
-            self.current_cookie = None
-            self.cookie_import_icon.setStyleSheet("color: red;")
-            self.cookie_import_text.setText("验证失败")
-            self.cookie_verify_icon.setStyleSheet("color: red;")
-            self.cookie_verify_text.setText("无效")
-            # 停止定时验证
-            self.cookie_timer.stop()
-            QMessageBox.critical(self, "错误", f"验证Cookies时出错: {str(e)}")
-            
-    def copy_cookies(self):
-        """复制Cookies"""
-        try:
-            success, cookies = self.cookie_manager.load_cookies()
-            if not success:
-                QMessageBox.warning(self, "警告", cookies)
-                return
-                
-            clipboard = QApplication.clipboard()
-            clipboard.setText(cookies)
-            QMessageBox.information(self, "成功", "Cookies已复制到剪贴板")
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"复制Cookies时出错: {str(e)}")
-
-    def auto_verify_cookies(self):
-        """自动验证Cookie有效性"""
-        try:
-            if not self.current_cookie:
-                return
-                
-            logger.info("开始自动验证Cookie有效性...")
-            valid, message = self.cookie_manager.verify_cookies(self.current_cookie)
-            
-            if valid:
-                self.cookie_verify_icon.setStyleSheet("color: green;")
-                self.cookie_verify_text.setText("有效")
-                logger.info("自动验证Cookie: 有效")
-            else:
-                self.current_cookie = None
-                self.cookie_verify_icon.setStyleSheet("color: red;")
-                self.cookie_verify_text.setText("无效")
-                logger.warning("自动验证Cookie: 无效")
-                # 显示通知
-                QMessageBox.warning(self, "Cookie已失效", "Cookie已失效，请重新导入并验证Cookie")
-        except Exception as e:
-            self.current_cookie = None
-            self.cookie_verify_icon.setStyleSheet("color: red;")
-            self.cookie_verify_text.setText("无效")
-            logger.error(f"自动验证Cookie时出错: {str(e)}")
-
-    def save_data(self):
-        """保存数据到Excel文件"""
-        try:
-            if not hasattr(self, 'current_data') or self.current_data is None:
-                QMessageBox.warning(self, "警告", "没有可保存的数据")
-                return
-                
-            # 获取保存文件路径
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "保存数据",
-                "抖音评论数据.xlsx",
-                "Excel Files (*.xlsx);;All Files (*)"
-            )
-            
-            if file_path:
-                # 如果用户没有指定.xlsx后缀，添加它
-                if not file_path.endswith('.xlsx'):
-                    file_path += '.xlsx'
-                    
-                # 保存数据到Excel
-                self.current_data.to_excel(file_path, index=False, engine='openpyxl')
-                self.add_log(f"数据已保存到: {file_path}")
-                QMessageBox.information(self, "成功", "数据已成功保存到Excel文件")
-                
-        except Exception as e:
-            error_msg = f"保存数据时出错:\n{str(e)}"
-            logger.error(error_msg)
-            QMessageBox.critical(self, "错误", error_msg)
+        cookie_buttons_layout.addWidget(self.import_cookie_btn)
+        cookie_buttons_layout.addWidget(self.verify_cookie_btn)
+        cookie_buttons_layout.addWidget(self.copy_cookie_btn)
+        
+        cookie_layout.addLayout(cookie_buttons_layout)
+        
+        cookie_tab.setLayout(cookie_layout)
+        
+        # 添加到标签页
+        self.tab_widget.addTab(cookie_tab, "Cookie管理")
+        
+        # 尝试加载保存的Cookies
+        self.load_saved_cookies()
 
 def main():
     try:
