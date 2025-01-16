@@ -80,6 +80,11 @@ class LoginWindow(QMainWindow):
         self.token = None
         self.user_info = None
         
+        # 创建定时器检查登录状态
+        self.check_login_timer = QTimer()
+        self.check_login_timer.timeout.connect(self.check_login_status)
+        self.check_login_timer.start(5000)  # 每5秒检查一次
+        
         # API基础URL
         self.base_url = "https://xxzcqrmtfyhm.sealoshzh.site/api"
         
@@ -150,7 +155,111 @@ class LoginWindow(QMainWindow):
         
     def closeEvent(self, event):
         """窗口关闭事件"""
+        # 停止定时器
+        if hasattr(self, 'check_login_timer'):
+            self.check_login_timer.stop()
         # 如果未登录成功就关闭窗口，则退出程序
         if not self.token or not self.user_info:
             QApplication.quit()
-        event.accept() 
+        event.accept()
+        
+    def check_login_status(self):
+        """检查登录状态"""
+        if not self.token:
+            return
+            
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.token}"
+            }
+            response = requests.get(
+                f"{self.base_url}/users/me",
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                # 只有当返回失败并且明确指出是其他设备登录时才退出
+                if not data.get("success") and data.get("message"):
+                    message = data.get("message", "").lower()
+                    if "other_login" in message:
+                        self.handle_other_login()
+                    elif "token_invalid" in message or "token_expired" in message:
+                        self.handle_token_expired()
+            elif response.status_code == 401:  # 未授权，token失效
+                self.handle_token_expired()
+                
+        except Exception as e:
+            logger.error(f"检查登录状态时出错: {str(e)}")
+            
+    def handle_other_login(self):
+        """处理账号在其他地方登录的情况"""
+        # 停止定时器
+        self.check_login_timer.stop()
+        
+        # 显示提示窗口
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setWindowTitle("账号已在其他设备登录")
+        msg_box.setText("您的账号已在其他设备登录，当前会话已失效")
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        
+        # 设置窗口样式
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: white;
+            }
+            QPushButton {
+                padding: 5px 15px;
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        
+        # 显示提示窗口并等待用户确认
+        msg_box.exec()
+        
+        # 退出应用程序
+        QApplication.quit()
+        
+    def handle_token_expired(self):
+        """处理token过期的情况"""
+        # 停止定时器
+        self.check_login_timer.stop()
+        
+        # 显示提示窗口
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setWindowTitle("登录已过期")
+        msg_box.setText("登录已过期，请重新登录")
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        
+        # 设置窗口样式
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: white;
+            }
+            QPushButton {
+                padding: 5px 15px;
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        
+        # 显示提示窗口并等待用户确认
+        msg_box.exec()
+        
+        # 退出应用程序
+        QApplication.quit() 
