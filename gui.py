@@ -19,6 +19,7 @@ from PyQt6.QtGui import QColor, QFont
 from main import fetch_all_comments_async, fetch_all_replies_async, process_comments, process_replies, load_cookie
 from deepseek_api import DeepSeekAPI
 from loguru import logger
+from login_window import LoginWindow
 
 # 配置日志
 logger.remove()
@@ -222,19 +223,20 @@ class AIAnalysisWorker(QThread):
             self.error.emit(str(e))
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, token):
         super().__init__()
+        self.token = token  # 保存登录token
         self.setWindowTitle("抖音评论采集工具")
         
         # 设置合适的字体
         font = QFont()
         if sys.platform == "darwin":  # macOS
-            font.setFamily("Helvetica")  # 使用更基础的系统字体
+            font.setFamily("Helvetica")
             chinese_font = QFont()
-            chinese_font.setFamily("STHeiti")  # macOS自带的中文字体
+            chinese_font.setFamily("STHeiti")
             QApplication.setFont(chinese_font, "QWidget")
         else:
-            font.setFamily("Microsoft YaHei")  # Windows 默认中文字体
+            font.setFamily("Microsoft YaHei")
         font.setPointSize(12)
         QApplication.setFont(font)
         
@@ -243,6 +245,12 @@ class MainWindow(QMainWindow):
         # 初始化Cookie管理器
         self.cookie_manager = CookieManager()
         self.current_cookie = None
+        
+        # 创建定时器，每30秒验证一次token
+        self.token_timer = QTimer()
+        self.token_timer.setInterval(30 * 1000)
+        self.token_timer.timeout.connect(self.verify_token)
+        self.token_timer.start()
         
         # 创建定时器，每5分钟验证一次Cookie
         self.cookie_timer = QTimer()
@@ -889,19 +897,98 @@ class MainWindow(QMainWindow):
                 widget.setEnabled(True)
         self.question_input.setEnabled(True)
 
+    def verify_token(self):
+        """验证token是否有效"""
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.token}"
+            }
+            response = requests.get(
+                "https://xxzcqrmtfyhm.sealoshzh.site/api/users/me",
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                self.token_expired("登录已过期，请重新登录")
+                return
+                
+            data = response.json()
+            if not data.get("success"):
+                # 检查是否是因为在其他地方登录
+                if "other_login" in data.get("message", "").lower():
+                    self.token_expired("您的账号已在其他设备登录，当前会话已失效")
+                else:
+                    self.token_expired("登录已过期，请重新登录")
+                
+        except Exception as e:
+            logger.error(f"验证token时发生错误: {str(e)}")
+            self.token_expired("网络连接错误，请重新登录")
+            
+    def token_expired(self, message):
+        """处理token过期情况"""
+        # 显示提示窗口
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setWindowTitle("登录已失效")
+        msg_box.setText(message)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        
+        # 设置窗口样式
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: white;
+            }
+            QPushButton {
+                padding: 5px 15px;
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        
+        # 显示提示窗口并等待用户确认
+        msg_box.exec()
+        
+        # 退出应用程序
+        QApplication.quit()
+
 def main():
     try:
         # 创建应用
         app = QApplication(sys.argv)
-        window = MainWindow()
-        window.show()
-        sys.exit(app.exec())
         
+        # 创建并显示登录窗口
+        login_window = LoginWindow()
+        login_window.show()
+        
+        # 等待登录窗口关闭
+        while login_window.isVisible():
+            app.processEvents()
+            
+        # 获取token和用户信息
+        token = login_window.get_token()
+        user_info = login_window.get_user_info()
+        
+        # 只有在成功获取token和用户信息时才继续
+        if token and user_info:
+            # 创建主窗口
+            window = MainWindow(token)
+            window.show()
+            return app.exec()
+        else:
+            # 登录失败，直接退出
+            return 1
+            
     except Exception as e:
         error_msg = f"程序启动失败:\n{str(e)}\n\n堆栈跟踪:\n{traceback.format_exc()}"
         logger.error(error_msg)
         QMessageBox.critical(None, "严重错误", error_msg)
-        sys.exit(1)
+        return 1
 
 if __name__ == "__main__":
-    main() 
+    sys.exit(main()) 

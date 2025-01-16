@@ -1,0 +1,75 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+block_cipher = None
+
+a = Analysis(
+    ['gui.py'],
+    pathex=[],
+    binaries=[],
+    datas=[
+        ('README.md', '.'),
+        ('requirements.txt', '.'),
+        ('cookie.txt', '.'),
+        ('cookie_json.txt', '.'),
+        ('deepseek_api_key.txt', '.'),
+    ],
+    hiddenimports=[
+        'PyQt6',
+        'PyQt6.QtCore',
+        'PyQt6.QtGui',
+        'PyQt6.QtWidgets',
+        'PyQt6.sip',
+        'pandas',
+        'pandas._libs.tslibs.base',
+        'pandas._libs.tslibs.np_datetime',
+        'pandas._libs.tslibs.timedeltas',
+        'pandas._libs.tslibs.timestamps',
+        'httpx',
+        'requests',
+        'loguru',
+        'openpyxl',
+        'asyncio',
+        'json',
+        'urllib',
+        're',
+        'traceback',
+        'os',
+        'sys',
+        'numpy',
+        'charset_normalizer.md__mypyc'
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='抖音评论采集工具',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon='icon.ico',
+    uac_admin=False,
+) 
