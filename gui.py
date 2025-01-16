@@ -246,12 +246,6 @@ class MainWindow(QMainWindow):
         self.cookie_manager = CookieManager()
         self.current_cookie = None
         
-        # 创建定时器，每30秒验证一次token
-        self.token_timer = QTimer()
-        self.token_timer.setInterval(30 * 1000)
-        self.token_timer.timeout.connect(self.verify_token)
-        self.token_timer.start()
-        
         # 创建定时器，每5分钟验证一次Cookie
         self.cookie_timer = QTimer()
         self.cookie_timer.setInterval(5 * 60 * 1000)  # 5分钟 = 5 * 60 * 1000毫秒
@@ -896,66 +890,6 @@ class MainWindow(QMainWindow):
             if widget.text() == "向AI提问":
                 widget.setEnabled(True)
         self.question_input.setEnabled(True)
-
-    def verify_token(self):
-        """验证token是否有效"""
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.token}"
-            }
-            response = requests.get(
-                "https://xxzcqrmtfyhm.sealoshzh.site/api/users/me",
-                headers=headers
-            )
-            
-            if response.status_code != 200:
-                self.token_expired("登录已过期，请重新登录")
-                return
-                
-            data = response.json()
-            if not data.get("success"):
-                # 检查是否是因为在其他地方登录
-                if "other_login" in data.get("message", "").lower():
-                    self.token_expired("您的账号已在其他设备登录，当前会话已失效")
-                else:
-                    self.token_expired("登录已过期，请重新登录")
-                
-        except Exception as e:
-            logger.error(f"验证token时发生错误: {str(e)}")
-            self.token_expired("网络连接错误，请重新登录")
-            
-    def token_expired(self, message):
-        """处理token过期情况"""
-        # 显示提示窗口
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Icon.Warning)
-        msg_box.setWindowTitle("登录已失效")
-        msg_box.setText(message)
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
-        
-        # 设置窗口样式
-        msg_box.setStyleSheet("""
-            QMessageBox {
-                background-color: white;
-            }
-            QPushButton {
-                padding: 5px 15px;
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: 3px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
-        
-        # 显示提示窗口并等待用户确认
-        msg_box.exec()
-        
-        # 退出应用程序
-        QApplication.quit()
 
 def main():
     try:

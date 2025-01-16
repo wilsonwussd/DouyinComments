@@ -79,8 +79,6 @@ class LoginWindow(QMainWindow):
         # 存储用户信息和token
         self.token = None
         self.user_info = None
-        self.check_token_timer = QTimer()
-        self.check_token_timer.timeout.connect(self.verify_token)
         
         # API基础URL
         self.base_url = "https://xxzcqrmtfyhm.sealoshzh.site/api"
@@ -112,8 +110,6 @@ class LoginWindow(QMainWindow):
                     self.token = data["token"]
                     self.user_info = data["user"]
                     
-                    # 启动token检查定时器（每30秒检查一次）
-                    self.check_token_timer.start(30 * 1000)
                     self.status_label.setText("登录成功")
                     self.status_label.setStyleSheet("color: green;")
                     self.accept_login()
@@ -134,70 +130,6 @@ class LoginWindow(QMainWindow):
             logger.error(f"登录时发生错误: {str(e)}")
             QMessageBox.critical(self, "错误", f"登录时发生错误: {str(e)}")
             
-    def verify_token(self):
-        """验证token是否有效"""
-        try:
-            headers = {
-                "Authorization": f"Bearer {self.token}"
-            }
-            response = requests.get(
-                f"{self.base_url}/users/me",
-                headers=headers
-            )
-            
-            if response.status_code != 200:
-                self.token_expired("登录已过期，请重新登录")
-                return
-                
-            data = response.json()
-            if not data.get("success"):
-                # 检查是否是因为在其他地方登录
-                if "other_login" in data.get("message", "").lower():
-                    self.token_expired("您的账号已在其他设备登录，当前会话已失效")
-                else:
-                    self.token_expired("登录已过期，请重新登录")
-                
-        except Exception as e:
-            logger.error(f"验证token时发生错误: {str(e)}")
-            self.token_expired("网络连接错误，请重新登录")
-            
-    def token_expired(self, message):
-        """处理token过期情况"""
-        self.check_token_timer.stop()
-        self.token = None
-        self.user_info = None
-        
-        # 显示提示窗口
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Icon.Warning)
-        msg_box.setWindowTitle("登录已失效")
-        msg_box.setText(message)
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg_box.setDefaultButton(QMessageBox.StandardButton.Ok)
-        
-        # 设置窗口样式
-        msg_box.setStyleSheet("""
-            QMessageBox {
-                background-color: white;
-            }
-            QPushButton {
-                padding: 5px 15px;
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: 3px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
-        
-        # 显示提示窗口并等待用户确认
-        msg_box.exec()
-        
-        # 退出应用程序
-        QApplication.quit()
-        
     def accept_login(self):
         """登录成功的处理"""
         if self.token and self.user_info:
@@ -218,7 +150,6 @@ class LoginWindow(QMainWindow):
         
     def closeEvent(self, event):
         """窗口关闭事件"""
-        self.check_token_timer.stop()
         # 如果未登录成功就关闭窗口，则退出程序
         if not self.token or not self.user_info:
             QApplication.quit()
