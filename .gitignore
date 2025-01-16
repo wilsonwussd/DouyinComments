@@ -21,30 +21,37 @@ wheels/
 *.egg
 
 # Virtual Environment
+.env
+.venv
+env/
 venv/
 ENV/
-env/
-.env
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
-.DS_Store
 
 # Project specific
-cookie.txt
-data/
 *.log
+cookie.txt
+cookie_json.txt
+deepseek_api_key.txt
 gui_error.log
-error.log
+*.xlsx
+*.csv
+归档.zip
+使用说明.txt
 
-# Test files
-test/
-tests/
-.pytest_cache/
+# Windows specific
+*.exe
+*.spec
+*.bat
+!build_windows.bat
+!build_setup.bat
 
-# Documentation
-docs/_build/
-docs/images/ 
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride 
