@@ -14,12 +14,13 @@ from PyQt6.QtWidgets import (
     QTextEdit, QRadioButton, QButtonGroup, QTabWidget, QStatusBar,
     QFileDialog, QGroupBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from main import fetch_all_comments_async, fetch_all_replies_async, process_comments, process_replies, load_cookie
 from deepseek_api import DeepSeekAPI
 from loguru import logger
 from login_window import LoginWindow
+import time
 
 # 配置日志
 logger.remove()
@@ -114,6 +115,12 @@ def extract_video_id(share_text):
         if share_text.isdigit():
             return share_text
             
+        # 尝试直接从URL中提取视频ID
+        video_id_pattern = r'/video/(\d+)'
+        match = re.search(video_id_pattern, share_text)
+        if match:
+            return match.group(1)
+            
         # 匹配短链接
         url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+|v\.douyin\.com/[^\s<>"]+'
         urls = re.findall(url_pattern, share_text)
@@ -124,18 +131,44 @@ def extract_video_id(share_text):
         # 获取第一个URL
         url = urls[0]
         
-        # 如果是短链接，获取重定向后的URL
+        # 如果是短链接，尝试使用高级请求头获取重定向后的URL
         if 'v.douyin.com' in url:
-            response = requests.get(url, allow_redirects=True)
-            url = response.url
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1"
+            }
             
-        # 从URL中提取视频ID
-        video_id_pattern = r'/video/(\d+)'
-        match = re.search(video_id_pattern, url)
-        
-        if match:
-            return match.group(1)
+            # 设置重试次数
+            max_retries = 3
+            retry_count = 0
             
+            while retry_count < max_retries:
+                try:
+                    session = requests.Session()
+                    # 禁用重定向，手动处理
+                    response = session.get(url, headers=headers, allow_redirects=False, timeout=10)
+                    
+                    # 检查是否有重定向
+                    if response.status_code in [301, 302]:
+                        redirect_url = response.headers.get('Location')
+                        if redirect_url:
+                            # 从重定向URL中提取视频ID
+                            match = re.search(video_id_pattern, redirect_url)
+                            if match:
+                                return match.group(1)
+                    break
+                except requests.exceptions.RequestException as e:
+                    retry_count += 1
+                    if retry_count == max_retries:
+                        logger.error(f"重试{max_retries}次后仍然失败: {str(e)}")
+                        return None
+                    logger.warning(f"第{retry_count}次重试...")
+                    time.sleep(1)  # 重试前等待1秒
+                    
         return None
     except Exception as e:
         logger.error(f"解析分享链接时出错: {str(e)}")
@@ -187,14 +220,61 @@ class CookieManager:
         """验证Cookies有效性"""
         try:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                "Cookie": cookies
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Cookie": cookies,
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+                "Referer": "https://www.douyin.com/",
+                "Origin": "https://www.douyin.com",
+                "Connection": "keep-alive"
             }
-            # 尝试访问抖音首页
-            response = requests.get("https://www.douyin.com", headers=headers)
-            return response.status_code == 200, "Cookies有效" if response.status_code == 200 else "Cookies无效"
+            
+            # 使用更简单的验证端点
+            url = "https://www.douyin.com/aweme/v1/web/im/user/info/"
+            params = {
+                "device_platform": "webapp",
+                "aid": "6383",
+                "channel": "channel_pc_web",
+                "pc_client_type": "1",
+                "version_code": "170400",
+                "version_name": "17.4.0",
+                "cookie_enabled": "true",
+                "platform": "PC",
+                "downlink": "10"
+            }
+            
+            # 发送请求
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+            
+            # 检查响应状态
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    # 如果能正常解析JSON，说明Cookie有效
+                    return True, "Cookies有效"
+                except:
+                    pass
+            
+            # 如果响应状态码不是200，检查是否需要登录
+            if "请登录" in response.text or "login" in response.text.lower():
+                return False, "Cookies已过期，请重新获取"
+            
+            # 如果是其他错误，返回状态码
+            return False, f"验证失败: HTTP {response.status_code}"
+            
+        except requests.exceptions.ConnectionError:
+            return False, "网络连接错误，请检查网络设置"
+        except requests.exceptions.Timeout:
+            return False, "请求超时，请稍后重试"
+        except requests.exceptions.RequestException as e:
+            return False, f"验证请求失败: {str(e)}"
         except Exception as e:
-            return False, f"验证Cookies失败: {str(e)}"
+            return False, f"验证出错: {str(e)}"
 
 class AIAnalysisWorker(QThread):
     """AI分析工作线程"""
@@ -221,6 +301,46 @@ class AIAnalysisWorker(QThread):
             self.finished.emit(response_text)
         except Exception as e:
             self.error.emit(str(e))
+
+class LoadingSpinner(QWidget):
+    """加载动画组件"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(80, 80)
+        self.counter = 0
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.rotate)
+        self.hide()  # 初始状态为隐藏
+
+    def start(self):
+        """开始动画"""
+        self.show()
+        self.timer.start(100)  # 每100ms更新一次
+
+    def stop(self):
+        """停止动画"""
+        self.timer.stop()
+        self.hide()
+
+    def rotate(self):
+        """更新旋转角度"""
+        self.counter = (self.counter + 30) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        """绘制加载动画"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 设置画笔
+        pen = QPen()
+        pen.setWidth(8)
+        pen.setColor(QColor("#1E90FF"))
+        painter.setPen(pen)
+        
+        # 绘制圆弧
+        rect = QRect(10, 10, 60, 60)
+        painter.drawArc(rect, self.counter * 16, 300 * 16)
 
 class MainWindow(QMainWindow):
     def __init__(self, token):
@@ -304,6 +424,9 @@ class MainWindow(QMainWindow):
         # 创建标签页
         self.tab_widget = QTabWidget()
         
+        # 创建加载动画组件（移到这里）
+        self.loading_spinner = LoadingSpinner(self)
+        
         # 创建三个标签页（按新的顺序）
         self.create_cookie_tab()      # 第一个标签页：Cookie管理
         self.create_collection_tab()  # 第二个标签页：评论采集
@@ -319,7 +442,7 @@ class MainWindow(QMainWindow):
         
         # 添加日志
         self.add_log("程序已启动，请先在Cookie管理页面导入并验证Cookie...")
-
+        
     def add_log(self, message):
         """添加日志到显示区域"""
         self.log_display.append(f"{message}")
@@ -329,122 +452,99 @@ class MainWindow(QMainWindow):
 
     def start_collection(self):
         """开始采集评论"""
-        try:
-            # 检查是否有cookie
-            if not self.current_cookie:
-                QMessageBox.warning(self, "警告", "请先在Cookie管理页面导入并验证Cookie")
-                return
-                
-            # 在开始采集前重新验证cookie
-            valid, message = self.cookie_manager.verify_cookies(self.current_cookie)
-            if not valid:
-                self.current_cookie = None
-                self.cookie_verify_icon.setStyleSheet("color: red;")
-                self.cookie_verify_text.setText("无效")
-                QMessageBox.warning(self, "Cookie已失效", "Cookie已失效，请重新导入并验证Cookie")
-                return
-                
-            input_text = self.input_field.text().strip()
-            if not input_text:
-                QMessageBox.warning(self, "警告", "请粘贴抖音分享链接")
-                return
-            
-            # 解析分享链接
-            self.add_log("正在解析分享链接...")
-            video_id = extract_video_id(input_text)
-            if not video_id:
-                QMessageBox.warning(self, "警告", "无法从分享链接中提取视频ID")
-                return
-            self.add_log(f"成功提取视频ID: {video_id}")
-            
-            # 清空日志显示和表格
-            self.log_display.clear()
-            self.table.setRowCount(0)
-            self.add_log(f"开始采集视频ID: {video_id} 的评论...")
-            
-            # 禁用开始按钮和保存按钮
-            self.start_button.setEnabled(False)
-            self.save_button.setEnabled(False)
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setRange(0, 0)  # 显示忙碌状态
-            
-            # 创建并启动工作线程，传入当前cookie
-            self.worker = CommentWorker(video_id, self.get_replies_checkbox.isChecked(), self.current_cookie)
-            self.worker.finished.connect(self.on_collection_finished)
-            self.worker.error.connect(self.on_collection_error)
-            self.worker.log.connect(self.add_log)
-            self.worker.start()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"启动采集时出错: {str(e)}")
+        # 显示加载动画
+        self.loading_spinner.start()
+        
+        # 禁用开始采集按钮
+        self.start_button.setEnabled(False)
+        
+        # 获取视频链接
+        share_text = self.input_field.text().strip()
+        if not share_text:
+            QMessageBox.warning(self, "错误", "请输入视频链接")
+            self.loading_spinner.stop()
             self.start_button.setEnabled(True)
-            self.progress_bar.setVisible(False)
-
-    def on_collection_error(self, error_msg):
-        """处理采集错误"""
-        self.start_button.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.save_button.setEnabled(False)
-        
-        # 根据错误类型显示不同的提示
-        if "Cookie已失效" in error_msg:
-            QMessageBox.warning(self, "Cookie已失效", "Cookie已失效，请更新Cookie")
-            self.cookie_verify_icon.setStyleSheet("color: red;")
-            self.cookie_verify_text.setText("无效")
-        elif "视频不存在" in error_msg or "已被删除" in error_msg:
-            QMessageBox.warning(self, "视频不存在", "视频不存在或已被删除")
-        elif "IP被限制" in error_msg:
-            QMessageBox.warning(self, "访问受限", "IP被限制，请稍后再试")
-        else:
-            QMessageBox.critical(self, "错误", f"采集失败: {error_msg}")
-        
-        self.add_log(f"采集失败: {error_msg}")
+            return
+            
+        # 提取视频ID
+        video_id = extract_video_id(share_text)
+        if not video_id:
+            QMessageBox.warning(self, "错误", "无法解析视频链接")
+            self.loading_spinner.stop()
+            self.start_button.setEnabled(True)
+            return
+            
+        # 创建工作线程
+        self.worker = CommentWorker(video_id, self.get_replies_checkbox.isChecked(), self.current_cookie)
+        self.worker.finished.connect(self.on_collection_finished)
+        self.worker.error.connect(self.on_collection_error)
+        self.worker.log.connect(self.add_log)
+        self.worker.start()
 
     def on_collection_finished(self, data):
-        """采集完成的回调函数"""
+        """采集完成的回调"""
         try:
+            # 停止加载动画
+            self.loading_spinner.stop()
+            
+            # 启用开始采集按钮
+            self.start_button.setEnabled(True)
+            
+            # 检查数据有效性
             if data is None or data.empty:
                 self.add_log("未获取到有效数据")
                 QMessageBox.warning(self, "提示", "未获取到有效数据")
                 return
                 
-            # 清空表格
-            self.table.setRowCount(0)
-            
             # 保存数据用于导出
             self.current_data = data
             
-            # 填充数据
+            # 清空表格
+            self.table.setRowCount(0)
+            
+            # 填充数据到表格
             for index, row in data.iterrows():
                 row_position = self.table.rowCount()
                 self.table.insertRow(row_position)
                 
                 # 设置单元格内容
-                self.table.setItem(row_position, 0, QTableWidgetItem(str(row['评论ID'])))
-                self.table.setItem(row_position, 1, QTableWidgetItem(str(row['评论内容'])))
-                self.table.setItem(row_position, 2, QTableWidgetItem(str(row['点赞数'])))
-                self.table.setItem(row_position, 3, QTableWidgetItem(str(row['评论时间'])))
-                self.table.setItem(row_position, 4, QTableWidgetItem(str(row['用户昵称'])))
-                self.table.setItem(row_position, 5, QTableWidgetItem(str(row['用户抖音号'])))
-                self.table.setItem(row_position, 6, QTableWidgetItem(str(row['ip归属'])))
+                self.table.setItem(row_position, 0, QTableWidgetItem(str(row.get('评论ID', ''))))
+                self.table.setItem(row_position, 1, QTableWidgetItem(str(row.get('评论内容', ''))))
+                self.table.setItem(row_position, 2, QTableWidgetItem(str(row.get('点赞数', 0))))
+                self.table.setItem(row_position, 3, QTableWidgetItem(str(row.get('评论时间', ''))))
+                self.table.setItem(row_position, 4, QTableWidgetItem(str(row.get('用户昵称', ''))))
+                self.table.setItem(row_position, 5, QTableWidgetItem(str(row.get('用户抖音号', ''))))
+                self.table.setItem(row_position, 6, QTableWidgetItem(str(row.get('ip归属', ''))))
                 self.table.setItem(row_position, 7, QTableWidgetItem(str(row.get('回复总数', 0))))
             
-            # 恢复界面状态
-            self.start_button.setEnabled(True)
-            self.progress_bar.setVisible(False)
+            # 启用保存按钮
             self.save_button.setEnabled(True)
             
             # 添加日志
-            self.add_log(f"数据采集完成，共获取 {self.table.rowCount()} 条数据")
+            total_rows = self.table.rowCount()
+            self.add_log(f"数据采集完成，共获取 {total_rows} 条数据")
             
             # 显示完成消息
-            QMessageBox.information(self, "提示", f"采集完成，共获取 {self.table.rowCount()} 条数据")
+            QMessageBox.information(self, "提示", f"采集完成，共获取 {total_rows} 条数据")
             
         except Exception as e:
-            self.add_log(f"处理数据时出错: {str(e)}")
-            QMessageBox.critical(self, "错误", f"处理数据时出错: {str(e)}")
+            error_msg = f"处理数据时出错: {str(e)}"
+            self.add_log(error_msg)
+            logger.error(error_msg)
+            QMessageBox.critical(self, "错误", error_msg)
             self.start_button.setEnabled(True)
-            self.progress_bar.setVisible(False)
+            self.save_button.setEnabled(False)
+
+    def on_collection_error(self, error_msg):
+        """采集出错的回调"""
+        # 停止加载动画
+        self.loading_spinner.stop()
+        
+        # 启用开始采集按钮
+        self.start_button.setEnabled(True)
+        
+        # 显示错误信息
+        QMessageBox.critical(self, "错误", error_msg)
 
     def load_saved_cookies(self):
         """加载保存的Cookies，静默验证不显示提示框"""
@@ -784,11 +884,20 @@ class MainWindow(QMainWindow):
         for i in range(8):
             header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         
+        # 创建加载动画容器
+        spinner_container = QWidget()
+        spinner_layout = QHBoxLayout()
+        spinner_layout.addStretch()
+        spinner_layout.addWidget(self.loading_spinner)
+        spinner_layout.addStretch()
+        spinner_container.setLayout(spinner_layout)
+        
         # 添加到主布局
         comment_layout.addLayout(input_layout)
         comment_layout.addWidget(self.progress_bar)
         comment_layout.addWidget(QLabel("运行日志:"))
         comment_layout.addWidget(self.log_display)
+        comment_layout.addWidget(spinner_container)  # 添加加载动画容器
         comment_layout.addWidget(self.table)
         
         comment_tab.setLayout(comment_layout)
