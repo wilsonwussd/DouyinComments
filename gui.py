@@ -1020,29 +1020,59 @@ class MainWindow(QMainWindow):
             return
             
         try:
+            # 配置请求
             headers = {
-                "Authorization": f"Bearer {self.token}"
+                "Authorization": f"Bearer {self.token}",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
-            response = requests.get(
+            
+            # 设置重试会话
+            session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(
+                max_retries=3,  # 最大重试次数
+                pool_connections=100,
+                pool_maxsize=100
+            )
+            session.mount('https://', adapter)
+            session.mount('http://', adapter)
+            
+            # 发送请求
+            response = session.get(
                 "https://xxzcqrmtfyhm.sealoshzh.site/api/users/me",
-                headers=headers
+                headers=headers,
+                timeout=10,  # 设置超时
+                verify=False  # 暂时禁用SSL验证
             )
             
             if response.status_code == 200:
-                data = response.json()
-                # 只有当返回失败并且明确指出是其他设备登录时才退出
-                if not data.get("success") and data.get("message"):
-                    message = data.get("message", "").lower()
-                    if "other_login" in message:
-                        self.handle_other_login()
-                    elif "token_invalid" in message or "token_expired" in message:
-                        self.handle_token_expired()
+                try:
+                    data = response.json()
+                    # 只有当返回失败并且明确指出是其他设备登录时才退出
+                    if not data.get("success") and data.get("message"):
+                        message = data.get("message", "").lower()
+                        if "other_login" in message:
+                            self.handle_other_login()
+                        elif "token_invalid" in message or "token_expired" in message:
+                            self.handle_token_expired()
+                except ValueError:
+                    logger.warning("解析响应数据失败")
             elif response.status_code == 401:  # 未授权，token失效
                 self.handle_token_expired()
                 
+        except requests.exceptions.SSLError as e:
+            logger.warning(f"SSL连接错误: {str(e)}")
+        except requests.exceptions.ConnectionError as e:
+            logger.warning(f"连接错误: {str(e)}")
+        except requests.exceptions.Timeout as e:
+            logger.warning(f"请求超时: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"请求异常: {str(e)}")
         except Exception as e:
             logger.error(f"检查登录状态时出错: {str(e)}")
-            
+        finally:
+            if 'session' in locals():
+                session.close()
+        
     def handle_other_login(self):
         """处理账号在其他地方登录的情况"""
         # 停止所有定时器

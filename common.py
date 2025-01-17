@@ -4,6 +4,7 @@ import urllib.parse
 import re
 import random
 import cookiesparser
+import platform
 from loguru import logger
 from typing import Optional, Dict, Tuple
 from retry import retry
@@ -58,9 +59,22 @@ COMMON_HEADERS = {
     "dnt": "1",
 }
 
+# 根据操作系统选择不同的Node.js运行时配置
+if platform.system() == 'Windows':
+    node_path = r'C:\Program Files\nodejs\node.exe'  # Windows默认Node.js路径
+    execjs.register('Node', {'runtime_path': node_path})
+else:
+    node_path = '/usr/local/bin/node'  # Mac默认Node.js路径
+    execjs.register('Node', {'runtime_path': node_path})
+
 try:
     # 加载签名脚本
-    DOUYIN_SIGN = execjs.compile(open('douyin.js', encoding='utf-8').read())
+    with open('douyin.js', 'r', encoding='utf-8') as f:
+        js_code = f.read()
+        # 处理可能的编码问题
+        js_code = js_code.replace('\ufeff', '')  # 移除BOM
+        js_code = js_code.encode('utf-8').decode('utf-8-sig')  # 处理编码
+    DOUYIN_SIGN = execjs.compile(js_code)
     logger.success("成功加载签名脚本")
 except Exception as e:
     logger.error(f"加载签名脚本失败: {str(e)}")
@@ -195,13 +209,31 @@ def common(uri: str, params: Dict, headers: Dict) -> Tuple[Dict, Dict]:
         params = deal_params(params, headers)
         
         # 生成签名
-        query = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in params.items()])
-        call_name = 'sign_reply' if 'reply' in uri else 'sign_datail'
-        
         try:
-            a_bogus = DOUYIN_SIGN.call(call_name, query, headers["User-Agent"])
-            params["X-Bogus"] = a_bogus
-            logger.debug(f"成功生成签名: {a_bogus[:20]}...")
+            # 构建查询字符串
+            query_items = []
+            for k, v in sorted(params.items()):  # 对参数排序以保证一致性
+                if v is not None:
+                    encoded_value = urllib.parse.quote(str(v))
+                    query_items.append(f'{k}={encoded_value}')
+            query = '&'.join(query_items)
+            
+            # 根据URI选择签名函数
+            call_name = 'sign_reply' if 'reply' in uri else 'sign_datail'
+            
+            try:
+                # 生成签名
+                a_bogus = DOUYIN_SIGN.call(call_name, query, headers["User-Agent"])
+                if not a_bogus:
+                    raise ValueError("签名生成结果为空")
+                    
+                params["X-Bogus"] = a_bogus
+                logger.debug(f"成功生成签名: {a_bogus[:20]}...")
+                
+            except execjs.RuntimeError as e:
+                logger.error(f"JavaScript运行时错误: {str(e)}")
+                raise ValueError(f"签名生成失败: {str(e)}")
+                
         except Exception as e:
             logger.error(f"生成签名时发生错误: {str(e)}")
             raise
