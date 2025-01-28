@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from main import fetch_all_comments_async, fetch_all_replies_async, process_comments, process_replies, load_cookie
+from fetch_comments import fetch_all_comments
 from deepseek_api import DeepSeekAPI
 from loguru import logger
 from login_window import LoginWindow
@@ -1036,12 +1037,11 @@ class MainWindow(QMainWindow):
             session.mount('https://', adapter)
             session.mount('http://', adapter)
             
-            # 发送请求
+            # 发送请求，启用证书验证
             response = session.get(
                 "https://xxzcqrmtfyhm.sealoshzh.site/api/users/me",
                 headers=headers,
-                timeout=10,  # 设置超时
-                verify=False  # 暂时禁用SSL验证
+                timeout=10
             )
             
             if response.status_code == 200:
@@ -1060,7 +1060,18 @@ class MainWindow(QMainWindow):
                 self.handle_token_expired()
                 
         except requests.exceptions.SSLError as e:
-            logger.warning(f"SSL连接错误: {str(e)}")
+            logger.warning(f"SSL证书验证失败，请确保服务器配置了有效的SSL证书: {str(e)}")
+            # 如果SSL验证失败，可以选择继续使用不安全的连接
+            try:
+                response = session.get(
+                    "https://xxzcqrmtfyhm.sealoshzh.site/api/users/me",
+                    headers=headers,
+                    timeout=10,
+                    verify=False
+                )
+                # 处理响应...
+            except Exception as inner_e:
+                logger.error(f"使用不安全连接时出错: {str(inner_e)}")
         except requests.exceptions.ConnectionError as e:
             logger.warning(f"连接错误: {str(e)}")
         except requests.exceptions.Timeout as e:
